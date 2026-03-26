@@ -164,20 +164,24 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 
 ## What to Try Next (Prioritized)
 
-### High Priority
-1. **Higher Muon WD** (0.05, 0.1) — WD=0.02 was great, is more better?
-2. **Larger batch tokens** (16384, 32768) — More data per step, better gradients
-3. **Spectral/overtone embedding init** — SOTA technique, not yet ported
+See `.lab/ideas_queue.md` for the full, detailed, and up-to-date research queue.
 
-### Medium Priority
-4. **Longer sequences** (2048) — Competition #5 used this for -0.02 BPB
-5. **Mixed int8/int6 quantization** — Save space for more parameters
-6. **MLP multiplier** (3x instead of 2x) — More model capacity in the MLP
+### Tier 1: Original Research (Novel Approaches)
+1. **Entropy-Guided Dynamic Precision** — Per-row bit allocation based on information content
+2. **Warmdown-Aware WD Scheduling** — WD scales inversely with LR during warmdown
+3. **Frequency-Decomposed Skip Gating** — Structured decomposition of U-Net skips
+4. **Compression-Aware Training** — Regularize directly for compressibility
+5. **Self-Compressing Orthogonal Init** — Structured low-entropy weight initialization
+6. **Progressive Layer Growing** — Start shallow, grow deep mid-training
 
-### Lower Priority
-7. **LoRA TTT** — Complex to port, but powerful (eval-time adaptation)
-8. **Residual mixing init tuning** — Sigmoid-scheduled from SOTA
-9. **Different head/KV ratios** — 12Q/4KV or 8Q/2KV
+### Tier 2: Informed Experiments (Our Twist)
+7. **Asymmetric MLP Capacity** — Wider MLPs in later layers
+8. **Attention Head Diversity** — Stochastic head masking as regularization
+9. **Muon Momentum Cycling** — Cosine-scheduled momentum
+10. **Dual-Phase Training** — Explore then exploit with different optimizer configs
+
+### Tier 3: Quick Sweeps
+11. Higher Muon WD (0.05, 0.1), Larger batch, 11 layers, RoPE base, QK gain
 
 ---
 
