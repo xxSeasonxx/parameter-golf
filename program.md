@@ -291,16 +291,55 @@ If you skip this step, your research has no memory and you'll repeat mistakes.
 
 Delete disproven hypotheses. Keep this file clean and accurate.
 
-**ideas_queue.md** — Your prioritized list of what to try next:
-- Delete ideas you just tried
-- Remove ideas invalidated by new learnings
-- Add new ideas inspired by your investigation
-- Keep ordered by expected impact
-
 **techniques_from_pytorch.md** — Update the cross-pollination tracker:
 - Check off techniques you've ported
 - Move failed ports to "Tried and Discarded" with a note on why
 - Add new techniques discovered from reading PyTorch records
+
+### 4.5. RE-EVALUATE: Research-driven idea reprioritization
+
+**Every experiment teaches you something bigger than its result.** Before moving on, step back and ask:
+
+**A. What deeper principle did this experiment reveal?**
+
+Don't just record "WD=0.02 improved BPB." Ask *why* it worked. Example chain:
+- *Observation*: WD=0.02 improved BPB by 0.031 AND reduced artifact by 1.1MB.
+- *Principle*: Regularized weights have lower entropy → better zlib compression.
+- *Implication*: **Anything that reduces weight entropy is doubly valuable** (better model + smaller artifact).
+- *New idea*: Compression-Aware Training — directly optimize for compressibility during training.
+- *Killed idea*: Warmdown reduction — we now know regularization during warmdown helps, not hurts.
+
+Write this reasoning in your analysis notes. The chain from observation → principle → new idea is the core research skill.
+
+**B. Reprioritize `ideas_queue.md` based on the new principle.**
+
+For each idea currently in the queue, ask:
+1. Does this experiment's result make this idea **more promising**? (Move up)
+2. Does it make this idea **less promising or invalid**? (Move down or kill)
+3. Does the new principle **spawn a better version** of this idea? (Replace)
+
+Example: If you discover that "late-training changes have outsized impact on final BPB," then:
+- Move up: warmdown-aware WD scheduling (targets late training)
+- Move down: better initialization (only helps early training)
+- Spawn: "late-phase architecture modification" — what if you enable extra capacity only during warmdown?
+
+**C. Keep the queue short and actionable.**
+
+- Maximum ~15 ideas. More than that means you're hoarding, not prioritizing.
+- Every idea must have a clear hypothesis and a way to test it.
+- If an idea has sat untested for 10+ experiments, either test it now or kill it — it's probably not actually high priority.
+- Group related ideas. If you have 3 ideas about quantization, test the most promising one and let it inform the others.
+
+**D. Look for idea combinations.**
+
+The most powerful experiments often combine two insights. After each run, scan the queue for pairs that reinforce each other:
+- WD success + skip connection analysis → "regularized skip weights"
+- Asymmetric MLP + entropy-guided quantization → "allocate both compute AND bits to later layers"
+- Embedding perturbation + frequency decomposition → "perturbation in frequency space"
+
+If a combination looks promising, add it as a new idea and prioritize it above its individual components.
+
+**This step is what separates parameter sweeping from research.** A sweep tries 50 values. A researcher tries 5 values, learns a principle, and uses it to skip the other 45.
 
 ### 5. DECIDE: Keep or reject? (compare against ALL-TIME BEST)
 
