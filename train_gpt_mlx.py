@@ -21,15 +21,16 @@ from pathlib import Path
 import numpy as np
 import sentencepiece as spm
 
-import mlx.core as mx
+import mlx.core as mx  # MLX arrays are lazily evaluated — ops build a compute graph, nothing runs until mx.eval()
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten, tree_unflatten  # MLX uses nested dicts for params; these flatten/unflatten them
 
 # ==============================================================================
 # SHARD FORMAT + COMPUTE DTYPE
 # ==============================================================================
 
+# MLX runs on Apple Silicon unified memory (CPU+GPU share RAM). bfloat16 is natively supported.
 COMPUTE_DTYPE = mx.bfloat16
 
 # ==============================================================================
@@ -58,10 +59,14 @@ class Hyperparameters:
     train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024)))
     # Chunk each logical MLX microbatch into smaller sub-batches to reduce peak
     # memory pressure without changing the effective optimizer batch.
+    # MLX-specific: controls sub-batch size within each grad_accum microbatch.
+    # Smaller values reduce peak memory by forcing earlier graph materialization.
     mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
     # Force MLX to materialize the graph after every sub-batch, preventing lazy
     # graph buildup across accumulation steps. Keeps peak memory low on 16GB machines.
     # Disable on 32GB+ unified memory for better throughput (MLX_EAGER_EVAL=0).
+    # When True, calls mx.eval() after each sub-batch to materialize the lazy graph immediately.
+    # Without this, MLX accumulates a huge graph across all sub-batches, spiking memory usage.
     mlx_eager_eval: bool = bool(int(os.environ.get("MLX_EAGER_EVAL", "1")))
     warmup_steps: int = int(os.environ.get("WARMUP_STEPS", 20))
     warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 1200))
@@ -139,6 +144,12 @@ INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = tuple(
 
 
 def token_chunks(total_tokens: int, seq_len: int, max_chunk_tokens: int) -> list[int]:
+    """Split a microbatch into smaller sub-batches for MLX memory control.
+
+    Unlike PyTorch where CUDA handles memory paging, MLX's lazy graph can grow unbounded.
+    Splitting into chunks and calling mx.eval() between them (see mlx_eager_eval) keeps
+    the compute graph small and peak unified memory usage predictable.
+    """
     usable_total = (total_tokens // seq_len) * seq_len
     if usable_total <= 0:
         raise ValueError(f"token budget too small for seq_len={seq_len}")
@@ -157,11 +168,16 @@ def accumulate_flat_grads(
     grads_tree: dict,
     scale: float,
 ) -> dict[str, mx.array]:
+    """Flatten MLX's nested grad tree into a flat dict and accumulate weighted gradients.
+
+    MLX returns grads as nested dicts mirroring model structure. We flatten them to
+    flat "dotted.key" dicts so we can do simple per-key accumulation across sub-batches.
+    """
     flat = dict(tree_flatten(grads_tree))
     if accum is None:
         return {k: g * scale for k, g in flat.items()}
     for k, g in flat.items():
-        accum[k] = accum[k] + g * scale
+        accum[k] = accum[k] + g * scale  # lazy — just extends the graph until mx.eval()
     return accum
 
 
@@ -278,11 +294,14 @@ class TokenLoader:
 # ==============================================================================
 
 class CastedLinear(nn.Module):
+    # Stores weights in fp32 and casts to compute dtype on the fly. MLX has no nn.Parameter;
+    # any mx.array attribute on an nn.Module is automatically a parameter.
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.weight = nn.Linear(in_dim, out_dim, bias=False).weight.astype(mx.float32)
 
     def __call__(self, x: mx.array) -> mx.array:
+        # Manual matmul instead of nn.Linear — MLX doesn't have F.linear(); x @ W^T is idiomatic.
         return x @ self.weight.astype(x.dtype).T
 
 
@@ -321,6 +340,8 @@ class CausalSelfAttention(nn.Module):
         self.c_v = CastedLinear(dim, kv_dim)
         self.proj = CastedLinear(dim, dim)
         self.q_gain = mx.ones((num_heads,), dtype=mx.float32) * qk_gain_init
+        # MLX provides nn.RoPE as a built-in module (PyTorch version uses a custom implementation).
+        # traditional=False selects the "non-interleaved" / GPT-NeoX style rotation.
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
         self.scale = self.head_dim ** -0.5
 
@@ -333,6 +354,8 @@ class CausalSelfAttention(nn.Module):
         q = self.rope(rms_norm(q).astype(COMPUTE_DTYPE))
         k = self.rope(rms_norm(k).astype(COMPUTE_DTYPE))
         q = q * self.q_gain.astype(q.dtype)[None, :, None, None]
+        # mx.fast.scaled_dot_product_attention dispatches to Metal-optimized attention kernels.
+        # mask="causal" enables the fused causal mask path (no explicit mask tensor needed).
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
         y = y.transpose(0, 2, 1, 3).reshape(bsz, seqlen, dim)
         return self.proj(y)
@@ -433,8 +456,11 @@ class GPT(nn.Module):
         return self.final_norm(x)
 
     def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
-        # Cross-entropy over flattened tokens. We keep optional logit chunking because it is a useful
-        # memory knob on Macs, but the common path is chunk_tokens=0 (single matmul + CE).
+        # MLX's nn.value_and_grad requires loss to be a method on the model (unlike PyTorch where
+        # the loss function is separate). This is because MLX traces through model.parameters()
+        # to determine what gets differentiated.
+        # Logit chunking splits the vocab projection to avoid materializing the full [tokens x vocab]
+        # logit matrix at once — critical on memory-limited unified memory Macs.
         x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
         y = target_ids.reshape(-1)
         if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
@@ -457,6 +483,8 @@ class GPT(nn.Module):
 class Muon:
     # Muon applies SGD-momentum to matrix gradients, then orthogonalizes the result before the
     # parameter update.
+    # Unlike PyTorch train_gpt.py, there is no distributed allreduce — MLX runs single-device only.
+    # Momentum buffers are plain dicts of mx.arrays (no torch optimizer state_dict machinery).
     def __init__(self, keys: list[str], params: dict[str, mx.array], args: Hyperparameters):
         self.keys = keys
         self.args = args
@@ -517,12 +545,16 @@ class SplitOptimizers:
         )
 
     def step(self, model: GPT, grads_tree: dict, step: int, lr_mul: float) -> None:
+        # MLX optimizers don't mutate params in-place like PyTorch. apply_gradients() returns
+        # new param dicts, which we collect into `updated` and then push back to the model.
         params = dict(tree_flatten(model.parameters()))
         grads = dict(tree_flatten(grads_tree))
         updated = dict(params)
 
         updated.update(self.muon.step(params, grads, step=step, lr_mul=lr_mul))
 
+        # MLX optim.Adam.learning_rate is a mutable property — we set it directly each step
+        # instead of using a scheduler callback (PyTorch uses param_groups or LR schedulers).
         self.adam_embed.learning_rate = self.args.tied_embed_lr * lr_mul
         updated.update(
             self.adam_embed.apply_gradients(
@@ -536,6 +568,8 @@ class SplitOptimizers:
         scalar_params = {k: params[k] for k in self.scalar_keys}
         updated.update(self.adam_scalar.apply_gradients(scalar_grads, scalar_params))
 
+        # model.update() replaces parameters in the module tree. This is how MLX "applies"
+        # optimizer results — there's no .step() that modifies tensors in-place.
         model.update(tree_unflatten(list(updated.items())))
 
 # ==============================================================================
@@ -560,6 +594,8 @@ INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
 def _np_float32(arr: mx.array) -> np.ndarray:
+    # MLX arrays live in unified memory — np.array() triggers mx.eval() and copies to a numpy view.
+    # This is the MLX equivalent of tensor.cpu().numpy() in PyTorch.
     return np.array(arr.astype(mx.float32), dtype=np.float32, copy=False)
 
 
@@ -591,6 +627,8 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
 
 
 def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str, object], dict[str, int]]:
+    # Quantization is done via numpy intermediaries (not MLX ops) since we need precise
+    # control over rounding/clipping and the result is serialized to disk anyway.
     quantized: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
     dtypes: dict[str, str] = {}
@@ -691,8 +729,9 @@ def build_sentencepiece_luts(
 
 def validate_dataset_tokenizer_pair(data_path: str, tokenizer_path: str) -> tuple[str, int, int | None]:
     # The shard directory and tokenizer are coupled: val_bpb is only meaningful if we
-    # decode bytes with the exact tokenizer that produced the shards. The manifest
-    # lets the training script fail fast on accidental dataset/tokenizer mismatches.
+    # decode bytes with the exact tokenizer that produced the shards. The manifest.json
+    # (in the datasets parent dir) records which tokenizer produced which shard set,
+    # letting the script fail fast on accidental dataset/tokenizer mismatches.
     dataset_dir = Path(data_path).resolve()
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
     if len(dataset_dir.parents) < 2:
@@ -743,18 +782,24 @@ def loss_and_grad_chunked(
     train_loader: TokenLoader,
     compiled_loss_and_grad,
 ) -> tuple[mx.array, dict]:
+    """Compute loss+grads for one microbatch, chunked into sub-batches for memory control.
+
+    This is the inner loop of gradient accumulation. Each microbatch is further split via
+    token_chunks() so the MLX lazy graph stays small. The outer training loop then
+    accumulates across grad_accum_steps microbatches before calling opt.step().
+    """
     chunk_sizes = token_chunks(args.microbatch_tokens, args.train_seq_len, args.mlx_max_microbatch_tokens)
     total_tokens = float(sum(chunk_sizes))
     loss_value = mx.array(0.0, dtype=mx.float32)
     grad_accum: dict[str, mx.array] | None = None
     for chunk_tokens in chunk_sizes:
         x, y = train_loader.next_batch(chunk_tokens, args.train_seq_len)
-        loss, grads = compiled_loss_and_grad(x, y)
+        loss, grads = compiled_loss_and_grad(x, y)  # still lazy — nothing computed yet
         scale = float(y.size) / total_tokens
         loss_value = loss_value + loss.astype(mx.float32) * scale
         grad_accum = accumulate_flat_grads(grad_accum, grads, scale)
         if args.mlx_eager_eval:
-            mx.eval(loss_value, grad_accum)  # materialize each chunk to cap peak memory
+            mx.eval(loss_value, grad_accum)  # force graph execution now, freeing intermediates
     return loss_value, tree_unflatten(list(grad_accum.items()))
 
 
@@ -769,7 +814,9 @@ def eval_val(
 ) -> tuple[float, float]:
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
-    # - val_bpb: tokenizer-agnostic compression metric used by the challenge
+    # - val_bpb: bits-per-byte, a tokenizer-agnostic compression metric used by the challenge.
+    #   BPB byte counting uses numpy arrays (base_bytes_lut, has_leading_space_lut, etc.) because
+    #   it needs SentencePiece token-to-byte mappings which are integer lookups, not differentiable.
     val_batch_tokens = args.val_batch_size // args.grad_accum_steps
     if val_batch_tokens < args.train_seq_len:
         raise ValueError(
@@ -794,7 +841,7 @@ def eval_val(
         y = mx.array(y_np, dtype=mx.int32)
         chunk_token_count = float(y.size)
         batch_loss = compiled_loss(x, y).astype(mx.float32)
-        mx.eval(batch_loss)
+        mx.eval(batch_loss)  # force evaluation — without this, the graph would grow across batches
         total_loss_sum += float(batch_loss.item()) * chunk_token_count
         prev_ids = x_np.reshape(-1)
         tgt_ids = y_np.reshape(-1)
@@ -903,10 +950,18 @@ def main() -> None:
     # ==============================================================================
     # COMPILED TRAIN / EVAL FUNCTIONS (MLX)
     # ==============================================================================
-    # The crucial MLX detail is capture scope: this model contains non-trainable arrays too (for example
-    # inside RoPE modules), so compiling only against trainable parameters throws "uncaptured inputs".
-    # Compiling the model-bound functions and capturing the full model state fixes that while still
-    # returning gradients only for trainable parameters via nn.value_and_grad(...).
+    # mx.compile() traces and caches the compute graph for repeated execution (like torch.compile).
+    # inputs/outputs=model.state tells MLX that model weights are "live state" that can change between
+    # calls (e.g., after optimizer updates). Without this, MLX would bake initial weight values into
+    # the compiled graph.
+    #
+    # The model also contains non-trainable arrays (e.g., RoPE frequency tables). Passing model.state
+    # (not just model.parameters()) captures everything, avoiding "uncaptured input" errors.
+    #
+    # Two separate compiled functions are needed because MLX traces different graphs:
+    # - compiled_loss: forward-only (used for validation)
+    # - compiled_loss_and_grad: forward + backward via nn.value_and_grad (used for training)
+    # They cannot share a compiled graph because the backward pass changes the trace structure.
     compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
     compiled_loss_and_grad = mx.compile(
         nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
@@ -961,10 +1016,11 @@ def main() -> None:
     # TRAINING LOOP
     # ==============================================================================
     if args.warmup_steps > 0:
-        # Warmup should only prime MLX compile/allocation paths. Updating parameters here forces us
-        # to snapshot and restore model/optimizer state, which is expensive on unified-memory Macs.
-        # Instead we run the real train shapes, force the loss/grads to materialize, and then reset
-        # the loader so measured training still starts from the true init and token window.
+        # Warmup primes MLX's compile cache and Metal memory allocator without affecting training.
+        # Unlike PyTorch, we do NOT snapshot/restore model weights here. Why? On unified memory Macs,
+        # saving a full copy of model + optimizer state doubles peak memory. Instead, we simply
+        # run forward+backward but skip the optimizer step, then reset the data loader so training
+        # starts from the correct token position. The weights remain at their initial values.
         for warmup_step in range(args.warmup_steps):
             accum: dict[str, mx.array] | None = None
             warmup_loss = mx.array(0.0, dtype=mx.float32)
@@ -972,12 +1028,12 @@ def main() -> None:
             for _ in range(args.grad_accum_steps):
                 warmup_loss, grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
                 accum = accumulate_flat_grads(accum, grads, grad_scale)
-            mx.eval(warmup_loss, accum)
-            mx.synchronize()
+            mx.eval(warmup_loss, accum)  # mx.eval() starts async GPU work
+            mx.synchronize()  # mx.synchronize() blocks until all GPU work completes (like torch.cuda.synchronize())
             if args.warmup_steps <= 20 or (warmup_step + 1) % 10 == 0 or warmup_step + 1 == args.warmup_steps:
                 log(f"warmup_step:{warmup_step + 1}/{args.warmup_steps}")
 
-        # Prime the standalone eval graph once too. It is compiled separately from value_and_grad.
+        # Prime the compiled_loss graph separately — it has a different trace than compiled_loss_and_grad.
         val_batch_tokens = args.val_batch_size // args.grad_accum_steps
         if val_batch_tokens < args.train_seq_len:
             raise ValueError(
@@ -1030,6 +1086,8 @@ def main() -> None:
 
         accum: dict[str, mx.array] | None = None
         train_loss = mx.array(0.0, dtype=mx.float32)
+        # Gradient accumulation is explicit here (no scaler or DDP averaging).
+        # PyTorch train_gpt.py divides by world_size * accum_steps; MLX has no distributed, so just accum_steps.
         grad_scale = 1.0 / args.grad_accum_steps
         for _ in range(args.grad_accum_steps):
             loss, grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
@@ -1040,8 +1098,10 @@ def main() -> None:
 
         grads = tree_unflatten(list(accum.items()))
         grads = clip_grad_tree(grads, args.grad_clip_norm)
-        train_loss_value = float(train_loss.item())
+        train_loss_value = float(train_loss.item())  # .item() triggers mx.eval() for this scalar
         opt.step(model, grads, step=step, lr_mul=lr_mul)
+        # mx.synchronize() is the timing fence — everything above is lazy/async. This blocks
+        # until all Metal GPU work finishes, giving accurate wall-clock step timing.
         mx.synchronize()
 
         step_ms = 1000.0 * (time.perf_counter() - step_t0)
@@ -1064,9 +1124,11 @@ def main() -> None:
     # model and running one final validation pass.
     out_path = out_dir / f"{args.run_id}_mlx_model.npz"
     flat_state = {k: v for k, v in tree_flatten(model.state)}
-    mx.savez(str(out_path), **flat_state)
+    mx.savez(str(out_path), **flat_state)  # MLX's native save format (numpy-compatible .npz)
     log(f"saved_model:{out_path} bytes:{out_path.stat().st_size}")
 
+    # Quantized checkpoint uses pickle + zlib (not torch.save) since MLX has no native
+    # checkpoint format for quantized models. The numpy intermediaries are pickle-friendly.
     quant_obj, quant_stats = quantize_state_dict_int8(flat_state)
     quant_raw = pickle.dumps(quant_obj, protocol=pickle.HIGHEST_PROTOCOL)
     quant_blob = zlib.compress(quant_raw, level=9)
