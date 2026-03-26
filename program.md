@@ -21,19 +21,23 @@ Work with the user to complete these steps before starting the experiment loop:
 
 1. **Agree on a run tag**: Propose a tag based on today's date (e.g. `lab/mar26`). The branch must not already exist.
 2. **Create the branch**: `git checkout -b <tag>` from current main.
-3. **Read the key files** for full context:
-   - `README.md` — competition overview and leaderboard
+3. **Read prior work first** (critical — prevents repeating failed experiments):
+   - `EXPERIMENT_LOG.md` — Full narrative of every past experiment, learnings, and failures
+   - `.lab/insights.md` — Validated technical knowledge base
+   - `.lab/ideas_queue.md` — Prioritized list of what to try next
+   - `.lab/techniques_from_pytorch.md` — Cross-pollination tracker
+4. **Read the key codebase files**:
    - `CLAUDE.md` — project instructions and architecture reference
    - `train_gpt_mlx.py` — **the file you modify**. Model architecture, optimizer, training loop for Apple Silicon.
    - `train_gpt.py` — PyTorch reference. Read-only but full of ideas to port.
-   - `TRAINING_WALKTHROUGH.md` — detailed explanation of every component
-4. **Study the records**: Read READMEs and submission.json files in `records/track_10min_16mb/` to understand what techniques have been tried and what worked. Update `.lab/techniques_from_pytorch.md` with any new findings.
-5. **Verify data exists**: Check that `./data/datasets/fineweb10B_sp1024/` contains data shards and `./data/tokenizers/fineweb_1024_bpe.model` exists. If not, tell the human to run:
+   - `README.md` — competition overview and leaderboard
+5. **Study the records** (if not already done in prior sessions): Read READMEs and submission.json files in `records/track_10min_16mb/` to understand what techniques have been tried and what worked. Update `.lab/techniques_from_pytorch.md` with any new findings.
+6. **Verify data exists**: Check that `./data/datasets/fineweb10B_sp1024/` contains data shards and `./data/tokenizers/fineweb_1024_bpe.model` exists. If not, tell the human to run:
    ```bash
    conda run -n openai --no-capture-output python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
    ```
-6. **Initialize tracking**: Verify `.lab/` directory exists with `insights.md`, `ideas_queue.md`, `techniques_from_pytorch.md`, and `results.tsv`. If not, create them.
-7. **Confirm and go**: Confirm setup looks good, then kick off the experiment loop.
+7. **Initialize tracking**: Verify `.lab/` directory exists with `insights.md`, `ideas_queue.md`, `techniques_from_pytorch.md`, and `results.tsv`. If not, create them.
+8. **Confirm and go**: Confirm setup looks good, then kick off the experiment loop.
 
 ## Constraints
 
@@ -62,21 +66,26 @@ The MLX script auto-saves a log to `logs/<RUN_ID>.txt` (no need to redirect stdo
 
 **Smoke test** (~1-2min on Apple Silicon, for quick iteration):
 ```bash
-RUN_ID=exp_NNN ITERATIONS=200 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 \
+RUN_ID=exp_NNN NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.02 \
+  ITERATIONS=200 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
 ```
 
-**Medium run** (~5-10min, for validating promising changes):
+**Medium run** (~15-20min including eval, for validating promising changes):
 ```bash
-RUN_ID=exp_NNN ITERATIONS=2000 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=500 \
+RUN_ID=exp_NNN NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.02 \
+  ITERATIONS=2000 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=500 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
 ```
 
 **Full run** (~30-60min+ on Mac, for final validation of significant improvements):
 ```bash
-RUN_ID=exp_NNN ITERATIONS=10000 VAL_LOSS_EVERY=2000 \
+RUN_ID=exp_NNN NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.02 \
+  ITERATIONS=10000 VAL_LOSS_EVERY=2000 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
 ```
+
+Note: The env vars above include the current best config (10L, FP16 tok_emb, Muon WD=0.02). Adjust as needed for your experiment.
 
 Replace `NNN` with the experiment number (e.g. `exp_001`, `exp_002`, ...).
 The log is also saved to `logs/exp_NNN.txt` by the script itself.
@@ -101,18 +110,59 @@ Note: Unlike the PyTorch version, the MLX script does **not** print peak memory 
 
 The **authoritative metric** is `final_int8_zlib_roundtrip_exact val_bpb` — this is what the competition scores. For smoke tests without full eval, use the last `val_bpb` from training or compare `train_loss` curves at equivalent steps.
 
-## Baseline Results
+## Current Best & Prior Work
 
-The baseline has already been established (unmodified `train_gpt_mlx.py`, 200 iterations, Apple Silicon):
+Multiple experiment sessions have been run. The current best and all learnings are documented in:
+- **`EXPERIMENT_LOG.md`** — Full narrative of every experiment, what worked, what failed, and why
+- **`.lab/insights.md`** — Validated technical learnings (the authoritative knowledge base)
+- **`.lab/ideas_queue.md`** — Prioritized queue of what to try next
+- **`.lab/results.tsv`** — Master results table
+
+**You MUST read `EXPERIMENT_LOG.md` and `.lab/insights.md` before starting any new experiments.** They contain hard-won knowledge that will prevent you from repeating failed experiments.
+
+### Current Best (as of lab/mar26b session, 2026-03-26)
 
 ```
-Smoke test (200 iters): val_bpb=2.4109 train_loss=3.9161
+commit: 6ed4a1d
+val_bpb: 1.8291 (Apple Silicon, 10L, TRAIN_BATCH_TOKENS=8192)
+artifact: 14.6MB (1.4MB headroom)
+config:
+  NUM_LAYERS=10
+  INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb
+  MUON_WEIGHT_DECAY=0.02
+  WARMDOWN_ITERS=1200 (default)
+  TRAIN_BATCH_TOKENS=8192
+```
+
+### Key Validated Insights (see EXPERIMENT_LOG.md for full details)
+
+- **10 layers > 9 layers**: ~0.05 BPB improvement, +1.2MB artifact. Non-negotiable.
+- **Muon WD=0.02**: -0.031 BPB AND -1.1MB artifact. Highest-impact single change.
+- **FP16 tok_emb**: Reduces quantization gap to +0.0001 BPB. +0.5MB artifact.
+- **Warmdown=1200 is optimal**: Reducing to 400 was WORSE on both BPB and artifact size. Acts as regularizer.
+- **Sliding window eval**: Implemented (`EVAL_STRIDE=64`), ~0.03 BPB gain. Too slow on Apple Silicon (~50min). Use for final submission on 8xH100 only.
+- **Never run experiments concurrently**: Unified memory contention degrades throughput 2-3x.
+- **Solo throughput**: ~1600 steps in 600s at ~370ms/step (10L, batch=8192).
+- **Weight decay improves compressibility**: Regularized weights compress better under zlib.
+
+### Failed Experiments (do NOT repeat)
+
+- **Warmdown=400**: Worse BPB (1.878 vs 1.861) AND artifact over 16MB (16.5MB). Long warmdown is good.
+- **INT8_KEEP_FLOAT_MAX_NUMEL=600000**: Accidentally kept all large tensors as FP16 (35MB artifact). Use name patterns instead.
+- **Concurrent runs on Apple Silicon**: 2-3x slower. Always run sequentially.
+
+### Original Baseline (for reference)
+
+```
+Unmodified train_gpt_mlx.py, 200 iterations:
+  val_bpb=2.4109 train_loss=3.9161
   ~320ms/step, ~25.7k tok/s, ~64s total training time
-  Artifact: ~11.3MB (logs/mlx_smoke_mlx_model.int8.ptz)
-  Full log: logs/mlx_smoke.txt
+  Artifact: ~11.3MB
 ```
 
-Use these numbers as the baseline for comparison. The first experiment should build on top of this.
+### Experiment Numbering
+
+Previous sessions used exp_001 through exp_009. **Start new experiments at exp_010.**
 
 ## Tracking and Analysis
 
@@ -289,12 +339,15 @@ The PyTorch `train_gpt.py` and `records/` directory are a goldmine of proven tec
 2. **`records/track_10min_16mb/*/README.md`** — Each submission explains its approach. The leaderboard (README.md) shows which techniques worked best.
 
 3. **Key techniques to port** (ordered by demonstrated impact):
-   - Spectral/overtone embedding initialization (SOTA: -0.05 BPB)
-   - Sliding window evaluation at inference time (-0.03 BPB)
-   - 10-layer architecture with mixed quantization
-   - Muon weight decay scheduling
-   - Residual mixing parameter tuning
-   - FP16 tied embeddings to save space for more parameters
+   - Spectral/overtone embedding initialization (SOTA: -0.05 BPB) — NOT YET PORTED
+   - ~~Sliding window evaluation at inference time (-0.03 BPB)~~ — DONE (EVAL_STRIDE env var)
+   - ~~10-layer architecture~~ — DONE (NUM_LAYERS=10)
+   - ~~Muon weight decay~~ — DONE (MUON_WEIGHT_DECAY=0.02)
+   - Residual mixing parameter tuning — NOT YET PORTED
+   - ~~FP16 tied embeddings~~ — DONE (INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb)
+   - Mixed int8/int6 quantization (Nan Liu) — NOT YET PORTED
+   - LoRA TTT evaluation (samacqua) — NOT YET PORTED
+   - Long context training (seq_len 2048-4096) — NOT YET TESTED
 
 When porting a technique, note the adaptation needed for MLX (no torch.compile, different memory model, lazy evaluation).
 
