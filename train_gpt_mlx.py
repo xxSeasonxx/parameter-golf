@@ -883,94 +883,83 @@ def eval_val_sliding(
     is_boundary_token_lut: np.ndarray,
     log_fn: Callable[[str], None] | None = None,
 ) -> tuple[float, float]:
-    """Sliding-window validation: each token is scored with (seq_len - stride) context.
+    """Sliding-window validation with batching for efficiency.
 
-    Instead of non-overlapping chunks where position 0 has zero context, we slide a window
-    of seq_len tokens with step size `stride`. Only the last `stride` tokens of each window
-    are scored, giving them (seq_len - stride) tokens of preceding context.
-    For the first window, all seq_len tokens are scored (they have 0..seq_len-1 context).
+    Processes overlapping windows where each scored token has (seq_len - stride) context.
+    Windows are batched together so multiple forward passes happen in parallel.
     """
     stride = args.eval_stride
     seq_len = args.train_seq_len
     n_tokens = val_tokens.size - 1  # -1 because targets are shifted by 1
 
+    # Build list of (win_start, score_start_in_val, n_scored) for each window
+    windows = []
+    # First window: score all seq_len tokens
+    first_win_len = min(seq_len, n_tokens)
+    windows.append((0, 0, first_win_len))
+    # Subsequent windows: slide by stride, score last stride tokens
+    pos = seq_len
+    while pos < n_tokens:
+        win_end = min(pos + stride, n_tokens)
+        win_start = max(win_end - seq_len, 0)
+        n_scored = min(stride, win_end - win_start)
+        score_start_in_val = win_end - n_scored
+        windows.append((win_start, score_start_in_val, n_scored))
+        pos = win_end
+
+    total_windows = len(windows)
+    if total_windows == 0:
+        return 0.0, 0.0
+
+    # Determine batch size: how many windows fit in val_batch_size tokens
+    batch_size = max(1, args.val_batch_size // (args.grad_accum_steps * seq_len))
+
     total_loss_sum = 0.0
     total_scored_tokens = 0.0
     total_bytes = 0.0
 
-    # Count total windows for progress reporting
-    total_windows = 0
-    pos = 0
-    while pos < n_tokens:
-        total_windows += 1
-        if pos == 0:
-            pos = seq_len
-        else:
-            pos = min(pos + stride, n_tokens)
-    if total_windows == 0:
-        return 0.0, 0.0
+    for batch_start in range(0, total_windows, batch_size):
+        batch_end = min(batch_start + batch_size, total_windows)
+        batch_windows = windows[batch_start:batch_end]
+        actual_batch = len(batch_windows)
 
-    window_idx = 0
-    pos = 0
-    while pos < n_tokens:
-        window_idx += 1
-        # Window boundaries
-        if pos == 0:
-            win_start = 0
-            win_end = min(seq_len, n_tokens)
-            score_start = 0  # score all tokens in first window
-        else:
-            win_end = min(pos + stride, n_tokens)
-            win_start = max(win_end - seq_len, 0)
-            score_start = win_end - min(stride, win_end - win_start) - win_start
-            # score_start is the offset within the window where we start scoring
+        # Stack windows into a batch: all padded/truncated to seq_len
+        x_batch = np.zeros((actual_batch, seq_len), dtype=np.int32)
+        y_batch = np.zeros((actual_batch, seq_len), dtype=np.int32)
+        for i, (ws, _, _) in enumerate(batch_windows):
+            win_len = min(seq_len, n_tokens - ws)
+            x_batch[i, :win_len] = val_tokens[ws:ws + win_len]
+            y_batch[i, :win_len] = val_tokens[ws + 1:ws + win_len + 1]
 
-        win_len = win_end - win_start
-        # Extract input and target tokens for this window
-        x_np = val_tokens[win_start:win_start + win_len].reshape(1, -1)
-        y_np = val_tokens[win_start + 1:win_start + win_len + 1].reshape(1, -1)
-
-        x = mx.array(x_np, dtype=mx.int32)
-        y = mx.array(y_np, dtype=mx.int32)
-
-        # Get per-token losses
+        x = mx.array(x_batch, dtype=mx.int32)
+        y = mx.array(y_batch, dtype=mx.int32)
         per_tok_loss = compiled_loss_per_token(x, y)
         mx.eval(per_tok_loss)
+        losses_np = np.array(per_tok_loss, dtype=np.float32).reshape(actual_batch, seq_len)
 
-        # Only score tokens from score_start onwards
-        scored_losses = np.array(per_tok_loss, dtype=np.float32).reshape(-1)
-        if pos == 0:
-            # First window: score all tokens
-            scored = scored_losses
-            score_offset = win_start
-        else:
-            # Subsequent windows: only score the last stride tokens
-            scored = scored_losses[score_start:]
-            score_offset = win_start + score_start
+        for i, (ws, score_start_val, n_scored) in enumerate(batch_windows):
+            # Score offset within this window
+            score_offset_in_win = score_start_val - ws
+            scored = losses_np[i, score_offset_in_win:score_offset_in_win + n_scored]
 
-        total_loss_sum += float(np.sum(scored, dtype=np.float64))
-        num_scored = len(scored)
-        total_scored_tokens += num_scored
+            total_loss_sum += float(np.sum(scored, dtype=np.float64))
+            total_scored_tokens += n_scored
 
-        # BPB byte counting for scored tokens only
-        tgt_ids = val_tokens[score_offset + 1:score_offset + num_scored + 1]
-        prev_ids = val_tokens[score_offset:score_offset + num_scored]
-        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
-        bytes_np += (
-            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
-        ).astype(np.int16, copy=False)
-        total_bytes += float(bytes_np.astype(np.float64).sum())
+            # BPB byte counting
+            tgt_ids = val_tokens[score_start_val + 1:score_start_val + n_scored + 1]
+            prev_ids = val_tokens[score_start_val:score_start_val + n_scored]
+            bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+            bytes_np += (
+                has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+            ).astype(np.int16, copy=False)
+            total_bytes += float(bytes_np.astype(np.float64).sum())
 
-        # Advance position
-        if pos == 0:
-            pos = seq_len
-        else:
-            pos = min(pos + stride, n_tokens)
-
-        if log_fn is not None and total_windows > 1 and (
-            window_idx == 1 or window_idx == total_windows or window_idx % 100 == 0
+        batch_idx = batch_start // batch_size + 1
+        total_batches = (total_windows + batch_size - 1) // batch_size
+        if log_fn is not None and total_batches > 1 and (
+            batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
         ):
-            log_fn(f"val_progress:{window_idx}/{total_windows}")
+            log_fn(f"val_progress:{batch_idx}/{total_batches}")
 
     val_loss = total_loss_sum / total_scored_tokens
     bits_per_token = val_loss / math.log(2.0)
@@ -1167,10 +1156,12 @@ def main() -> None:
         warm_val_loss = compiled_loss(x_val, y_val)
         mx.eval(warm_val_loss)
         if args.eval_stride > 0:
-            # Also prime the per-token loss graph for sliding window eval (different shape: single seq)
-            x_single = mx.array(val_tokens[:args.train_seq_len].reshape(1, -1), dtype=mx.int32)
-            y_single = mx.array(val_tokens[1:args.train_seq_len + 1].reshape(1, -1), dtype=mx.int32)
-            warm_per_tok = compiled_loss_per_token(x_single, y_single)
+            # Prime the per-token loss graph for sliding window eval with expected batch shape
+            sw_batch_size = max(1, args.val_batch_size // (args.grad_accum_steps * args.train_seq_len))
+            warm_n = min(sw_batch_size, (val_tokens.size - 1) // args.train_seq_len)
+            warm_x = mx.array(val_tokens[:warm_n * args.train_seq_len].reshape(warm_n, -1), dtype=mx.int32)
+            warm_y = mx.array(val_tokens[1:warm_n * args.train_seq_len + 1].reshape(warm_n, -1), dtype=mx.int32)
+            warm_per_tok = compiled_loss_per_token(warm_x, warm_y)
             mx.eval(warm_per_tok)
         mx.synchronize()
 
