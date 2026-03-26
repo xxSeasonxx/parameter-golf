@@ -599,7 +599,12 @@ MX_DTYPE_FROM_NAME = {
     "bfloat16": mx.bfloat16,
 }
 
-INT8_KEEP_FLOAT_MAX_NUMEL = int(os.environ.get("INT8_KEEP_FLOAT_MAX_NUMEL", 65_536))
+INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
+# Tensors matching these patterns are kept as FP16 regardless of size (not int8 quantized).
+# Use for critical tensors like tied embeddings where quantization error hurts disproportionately.
+INT8_KEEP_FLOAT_FP16_NAME_PATTERNS = tuple(
+    os.environ.get("INT8_KEEP_FLOAT_FP16_NAME_PATTERNS", "").split(",")
+) if os.environ.get("INT8_KEEP_FLOAT_FP16_NAME_PATTERNS") else ()
 INT8_KEEP_FLOAT_STORE_DTYPE = np.float16
 INT8_PER_ROW_SCALE_DTYPE = np.float16
 INT8_CLIP_PERCENTILE = 99.99984
@@ -665,6 +670,13 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
         # Small float tensors are cheap enough to keep directly. We still downcast
         # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
         if int(arr.size) <= INT8_KEEP_FLOAT_MAX_NUMEL:
+            kept = keep_float_array(name, arr, passthrough_orig_dtypes)
+            passthrough[name] = kept
+            stats["int8_payload_bytes"] += int(kept.nbytes)
+            continue
+
+        # Named patterns can force specific large tensors to stay as FP16 (e.g., tied embeddings).
+        if INT8_KEEP_FLOAT_FP16_NAME_PATTERNS and any(p in name for p in INT8_KEEP_FLOAT_FP16_NAME_PATTERNS):
             kept = keep_float_array(name, arr, passthrough_orig_dtypes)
             passthrough[name] = kept
             stats["int8_payload_bytes"] += int(kept.nbytes)
