@@ -85,28 +85,41 @@ conda run -n openai --no-capture-output python3 -m pytest test_analyze.py -v
 - RoPE positional embeddings, ReLU² MLP activation, RMSNorm
 - Tied input/output embeddings
 - Default: 9 layers, 512 dim, vocab size 1024
+- **Current best config**: 10 layers, 512 dim, Muon WD=0.02, FP16 tok_emb (val_bpb=1.8291 on Apple Silicon)
 
 ### Configuration
 All hyperparameters are set via **environment variables** (no CLI args). Key ones:
 - Model: `NUM_LAYERS`, `MODEL_DIM`, `NUM_HEADS`, `NUM_KV_HEADS`, `VOCAB_SIZE`, `MLP_MULT`
 - Training: `ITERATIONS`, `TRAIN_BATCH_TOKENS`, `TRAIN_SEQ_LEN`, `MAX_WALLCLOCK_SECONDS`
-- Optimizer: `EMBED_LR`, `MATRIX_LR`, `SCALAR_LR`, `MUON_MOMENTUM`
+- Optimizer: `EMBED_LR`, `MATRIX_LR`, `SCALAR_LR`, `MUON_MOMENTUM`, `MUON_WEIGHT_DECAY`
+- Evaluation: `EVAL_STRIDE` (sliding window, 0=off, 64=competition standard)
+- Quantization: `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS` (comma-separated tensor names to keep as FP16)
 - LoRA TTT: `TTT_LORA_RANK`, `TTT_LORA_LR`, `TTT_CHUNK_SIZE`, `TTT_EVAL_SEQ_LEN`
 - MLX-specific: `MLX_MAX_MICROBATCH_TOKENS`, `MLX_EAGER_EVAL`, `GRAD_ACCUM_STEPS`
 
 ### Key Technical Details
 - **Muon optimizer** for matrix parameters (Newton-Schulz orthogonalization), Adam for embeddings and scalars
-- **Post-training quantization**: int8 per-row quantization + zlib compression to fit 16MB limit. Control tensors (names containing `scale`, `gain`, `bias`) stay FP32.
+- **Muon weight decay** (`MUON_WEIGHT_DECAY`, default 0.0): Decoupled WD on matrix params. 0.02 validated as beneficial.
+- **Post-training quantization**: int8 per-row quantization + zlib compression to fit 16MB limit. Control tensors stay FP32. Embeddings can be kept as FP16 via `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb`.
+- **Sliding window evaluation** (`EVAL_STRIDE`): Overlapping context windows for better eval. Too slow on Apple Silicon (~50min), use on 8xH100 only.
 - **Tokenizer-agnostic BPB evaluation**: lookup tables mapping token IDs to byte lengths
 - **Test-Time Training (LoRA)**: per-document LoRA adaptation during evaluation — test-time compute is free
-- **Wallclock-based LR scheduling**: warmdown computed from remaining wall time, not iteration count
+- **Wallclock-based LR scheduling**: warmdown computed from remaining wall time, not iteration count. Warmdown=1200 is validated as optimal.
 - **MLX lazy evaluation**: graphs build up until `mx.eval()` — use `MLX_MAX_MICROBATCH_TOKENS` and `MLX_EAGER_EVAL` to control memory pressure on Apple Silicon
+
+### Key Documentation
+- **`EXPERIMENT_LOG.md`** — Full narrative of all past experiments, learnings, failures, and code changes. **Read this first in any new session.**
+- **`program.md`** — Autonomous experiment agent instructions with research philosophy, validation protocol, and experiment loop.
+- **`.lab/insights.md`** — Validated technical knowledge base and current best tracking.
+- **`.lab/ideas_queue.md`** — Prioritized research queue with original ideas (not just parameter sweeps).
 
 ### Autonomous Experiment Workflow
 When running as an autonomous agent (see `program.md`):
-1. Only modify `train_gpt_mlx.py` — everything else is read-only
-2. Use tiered runs: smoke test (200 iters) → medium (2000 iters) → full (10000+ iters)
-3. After each run: `python3 analyze.py` to archive and generate analysis
-4. Compare against all-time best in `.lab/insights.md`, not previous run
-5. Keep improvements, revert regressions by restoring from `.lab/<best_commit>/train_gpt_mlx.py`
-6. Mine `train_gpt.py` and `records/` for proven techniques to port to MLX
+1. **Read `EXPERIMENT_LOG.md` and `.lab/insights.md` first** — prevents repeating failed experiments
+2. Only modify `train_gpt_mlx.py` — everything else is read-only
+3. **Be a researcher, not a copier** — develop original ideas, use competition as inspiration only
+4. Use tiered runs: smoke test (200 iters) → medium (2000 iters) → full (10000+ iters)
+5. **Validate novel code** before running: syntax check → shape/value sanity → 5-step micro-run (see program.md section 6.5)
+6. After each run: `python3 analyze.py` to archive and generate analysis
+7. Compare against all-time best in `.lab/insights.md`, not previous run
+8. Keep improvements, revert regressions by restoring from `.lab/<best_commit>/train_gpt_mlx.py`

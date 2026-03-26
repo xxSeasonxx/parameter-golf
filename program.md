@@ -60,6 +60,29 @@ Work with the user to complete these steps before starting the experiment loop:
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Removing something and getting equal or better results is a great outcome.
 
+## Research Philosophy
+
+**This is a competition, not a homework assignment.** Do NOT simply copy techniques from other submissions or papers. Use the competition leaderboard, academic literature, and `train_gpt.py` as *learning and inspiration* — understand *why* techniques work, then develop your own original approaches.
+
+**Think like a researcher:**
+- **Understand the binding constraint.** At 16MB, the core challenge is *bits per parameter* — information density. Every idea should either pack more signal per byte of artifact, or extract more signal at eval time for free.
+- **Form hypotheses from first principles.** "Weight decay improves compressibility" led us to WD=0.02. The next step isn't WD=0.03 — it's asking "what else makes weights more compressible?" and inventing Compression-Aware Training.
+- **Combine insights in new ways.** The best ideas often emerge from connecting two known observations. Our warmdown insight (long warmdown = regularizer) + our WD insight (WD = regularizer + compressor) suggests warmdown-aware WD scheduling.
+- **Challenge defaults.** Why is MLP width uniform across layers? Why are skip connections symmetric? Why is quantization bit-width uniform? Question every fixed choice.
+- **Validate, don't assume.** An elegant hypothesis is worthless without a clean experiment. Use the tiered run approach (smoke → medium → full) to validate cheaply.
+
+**What counts as original work:**
+- Novel combinations of existing ideas that nobody has tried together
+- New scheduling strategies (WD, momentum, LR, noise)
+- Architectural modifications motivated by our own analysis (asymmetric capacity, frequency gating)
+- Quantization innovations (per-row adaptive precision, compression-aware training)
+- Training dynamics insights unique to this setup (progressive growing, dual-phase)
+
+**What does NOT count:**
+- Copying someone's submission code
+- Blindly porting a technique without understanding why it works
+- Parameter grid searches without a hypothesis
+
 ## Run Commands
 
 The MLX script auto-saves a log to `logs/<RUN_ID>.txt` (no need to redirect stdout). Also pipe to `run.log` so `analyze.py` can find it.
@@ -398,26 +421,28 @@ conda run -n openai --no-capture-output python3 analyze.py
 
 Go back to step 0.
 
-## Mining the PyTorch Codebase
+## Learning from the Ecosystem (Inspire, Don't Copy)
 
-The PyTorch `train_gpt.py` and `records/` directory are a goldmine of proven techniques. Periodically (every 5-10 experiments), spend time reading:
+The PyTorch `train_gpt.py`, `records/`, and the broader competition community are sources of *understanding*, not copy-paste material. Use them to learn **why** things work, then develop **your own** approaches.
 
-1. **`train_gpt.py`** — Compare it line-by-line with `train_gpt_mlx.py`. Any differences in architecture, initialization, optimizer config, or training loop are potential improvements.
+**How to learn from references:**
+1. **`train_gpt.py`** — Read for architectural understanding. Ask "why is this designed this way?" not "how do I copy this?"
+2. **`records/track_10min_16mb/*/README.md`** — Study the progression of ideas. What patterns emerge across winners?
+3. **Competition leaderboard** — Understand the frontier, but aim to push it with original work.
+4. **Academic literature** — Search for recent papers on small model training, quantization, optimizer design. Web search is available.
 
-2. **`records/track_10min_16mb/*/README.md`** — Each submission explains its approach. The leaderboard (README.md) shows which techniques worked best.
+**Already ported from PyTorch (do not re-do):**
+- ~~10-layer architecture~~ (NUM_LAYERS=10)
+- ~~Muon weight decay~~ (MUON_WEIGHT_DECAY=0.02)
+- ~~FP16 tied embeddings~~ (INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb)
+- ~~Sliding window eval~~ (EVAL_STRIDE=64, too slow on Mac, use on 8xH100)
 
-3. **Key techniques to port** (ordered by demonstrated impact):
-   - Spectral/overtone embedding initialization (SOTA: -0.05 BPB) — NOT YET PORTED
-   - ~~Sliding window evaluation at inference time (-0.03 BPB)~~ — DONE (EVAL_STRIDE env var)
-   - ~~10-layer architecture~~ — DONE (NUM_LAYERS=10)
-   - ~~Muon weight decay~~ — DONE (MUON_WEIGHT_DECAY=0.02)
-   - Residual mixing parameter tuning — NOT YET PORTED
-   - ~~FP16 tied embeddings~~ — DONE (INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb)
-   - Mixed int8/int6 quantization (Nan Liu) — NOT YET PORTED
-   - LoRA TTT evaluation (samacqua) — NOT YET PORTED
-   - Long context training (seq_len 2048-4096) — NOT YET TESTED
+**Remaining reference techniques** (understand these, then innovate beyond them):
+- Spectral/overtone embedding init — understand the principle (structured low-entropy init), then try our own variant
+- Mixed-precision quantization — understand per-layer sensitivity, then try entropy-guided allocation
+- LoRA TTT — understand eval-time adaptation, then explore novel adaptation strategies
 
-When porting a technique, note the adaptation needed for MLX (no torch.compile, different memory model, lazy evaluation).
+**Key insight from competition analysis**: The binding constraint is *bits per parameter* in the artifact. The winners co-optimize the entire pipeline: init → training → quantization → compression → evaluation. Don't optimize one stage in isolation.
 
 ## Important Rules
 
