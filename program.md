@@ -307,6 +307,74 @@ Think about what the investigation told you — don't just try random things. Be
 
 Git commit your change with a clear description of the hypothesis.
 
+### 6.5. VALIDATE: Pre-flight checks before running
+
+**Novel code changes are bug-prone.** Before launching a training run with new code, run this lightweight validation checklist. Skip this for pure env-var changes (those can't introduce bugs).
+
+**A. Syntax & import check** (~5 seconds):
+```bash
+conda run -n openai --no-capture-output python3 -c "import train_gpt_mlx; print('OK')"
+```
+If this fails, fix the syntax error before proceeding.
+
+**B. Shape & value sanity check** (~30 seconds):
+Write a quick inline test that instantiates the model and verifies your change does what you expect. Examples:
+
+```python
+# For a new init strategy:
+conda run -n openai --no-capture-output python3 -c "
+from train_gpt_mlx import *
+args = Hyperparameters()
+model = GPT(args.vocab_size, args.num_layers, args.model_dim, args.num_heads, args.num_kv_heads,
+            args.mlp_mult, args.logit_chunk_tokens, args.logit_softcap, args.rope_base,
+            args.tied_embed_init_std, args.qk_gain_init)
+# Check shapes, value ranges, or whatever your change affects
+print('tok_emb shape:', model.tok_emb.weight.shape)
+print('tok_emb std:', float(model.tok_emb.weight.astype(mx.float32).var()**0.5))
+print('PASS')
+"
+```
+
+```python
+# For an optimizer change:
+# Verify the new schedule/WD/momentum produces expected values at key steps
+conda run -n openai --no-capture-output python3 -c "
+from train_gpt_mlx import Hyperparameters
+args = Hyperparameters()
+# Check lr_mul at start, middle, end
+for step, ms in [(0, 0), (500, 180000), (1500, 550000), (1600, 600000)]:
+    print(f'step={step} lr_mul={args.lr_mul(step, ms):.4f}')
+print('PASS')
+"
+```
+
+**C. 5-step micro-run** (~30 seconds):
+Run 5 training steps and check loss is finite and decreasing:
+```bash
+RUN_ID=validate ITERATIONS=5 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 MAX_WALLCLOCK_SECONDS=60 \
+  conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tail -5
+```
+- Loss should be ~6.9 at step 1 (random init cross-entropy over vocab 1024 ≈ ln(1024) ≈ 6.93)
+- Loss should decrease over 5 steps
+- **Red flags**: NaN, Inf, loss increasing, loss stuck at exactly the same value, loss >> 7.0
+
+**D. When a run fails or produces suspicious results**:
+
+Classify the failure:
+
+| Symptom | Likely Cause | Action |
+|---------|-------------|--------|
+| Crash before step 1 | Shape mismatch, bad init, import error | Fix and re-run |
+| NaN after N steps | Gradient explosion, bad LR/WD interaction | Check value ranges, reduce LR, add gradient clipping |
+| Loss stuck at ~6.93 | Model not learning (zero gradients, broken optimizer) | Print gradient norms, check optimizer is updating params |
+| Loss much worse than baseline | Bug in forward pass, wrong masking, bad scale | Compare output shapes/values vs unmodified code |
+| Loss close but slightly worse | The idea just didn't work (not a bug) | Discard the idea, not the approach |
+| Artifact over 16MB | Model too large or weights not compressible | Check param count, try stronger WD |
+
+**Key rule**: If a novel idea produces a result >0.1 BPB worse than baseline at the same step count, **suspect a bug first** before blaming the idea. Run the sanity checks above. Only classify as "idea failed" after confirming the implementation is correct.
+
+**Never discard an idea on a crashed/NaN run.** Fix the bug and retry once. Only discard after a clean run shows the idea doesn't help.
+
 ### 7. RUN: Launch the experiment
 
 Use the appropriate tier:
