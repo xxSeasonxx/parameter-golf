@@ -99,6 +99,11 @@ class Hyperparameters:
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
+    # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
+    # stride=0 disables sliding window (default, non-overlapping chunks).
+    # stride=64 matches the competition's best evaluation strategy.
+    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 0))
+
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
     @property
@@ -476,6 +481,14 @@ class GPT(nn.Module):
             logits = self.softcap(logits_proj)
             loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
         return loss_sum / float(n)
+
+    def loss_per_token(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
+        """Return per-token cross-entropy losses (no reduction). Shape: (batch * seq_len,)."""
+        x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
+        y = target_ids.reshape(-1)
+        logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
+        logits = self.softcap(logits_proj)
+        return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="none")
 
 # ==============================================================================
 # OPTIMIZERS (MUON + ADAM SPLIT)
@@ -860,6 +873,111 @@ def eval_val(
     val_bpb = bits_per_token * (total_tokens / total_bytes)
     return val_loss, val_bpb
 
+
+def eval_val_sliding(
+    args: Hyperparameters,
+    compiled_loss_per_token,
+    val_tokens: np.ndarray,
+    base_bytes_lut: np.ndarray,
+    has_leading_space_lut: np.ndarray,
+    is_boundary_token_lut: np.ndarray,
+    log_fn: Callable[[str], None] | None = None,
+) -> tuple[float, float]:
+    """Sliding-window validation: each token is scored with (seq_len - stride) context.
+
+    Instead of non-overlapping chunks where position 0 has zero context, we slide a window
+    of seq_len tokens with step size `stride`. Only the last `stride` tokens of each window
+    are scored, giving them (seq_len - stride) tokens of preceding context.
+    For the first window, all seq_len tokens are scored (they have 0..seq_len-1 context).
+    """
+    stride = args.eval_stride
+    seq_len = args.train_seq_len
+    n_tokens = val_tokens.size - 1  # -1 because targets are shifted by 1
+
+    total_loss_sum = 0.0
+    total_scored_tokens = 0.0
+    total_bytes = 0.0
+
+    # Count total windows for progress reporting
+    total_windows = 0
+    pos = 0
+    while pos < n_tokens:
+        total_windows += 1
+        if pos == 0:
+            pos = seq_len
+        else:
+            pos = min(pos + stride, n_tokens)
+    if total_windows == 0:
+        return 0.0, 0.0
+
+    window_idx = 0
+    pos = 0
+    while pos < n_tokens:
+        window_idx += 1
+        # Window boundaries
+        if pos == 0:
+            win_start = 0
+            win_end = min(seq_len, n_tokens)
+            score_start = 0  # score all tokens in first window
+        else:
+            win_end = min(pos + stride, n_tokens)
+            win_start = max(win_end - seq_len, 0)
+            score_start = win_end - min(stride, win_end - win_start) - win_start
+            # score_start is the offset within the window where we start scoring
+
+        win_len = win_end - win_start
+        # Extract input and target tokens for this window
+        x_np = val_tokens[win_start:win_start + win_len].reshape(1, -1)
+        y_np = val_tokens[win_start + 1:win_start + win_len + 1].reshape(1, -1)
+
+        x = mx.array(x_np, dtype=mx.int32)
+        y = mx.array(y_np, dtype=mx.int32)
+
+        # Get per-token losses
+        per_tok_loss = compiled_loss_per_token(x, y)
+        mx.eval(per_tok_loss)
+
+        # Only score tokens from score_start onwards
+        scored_losses = np.array(per_tok_loss, dtype=np.float32).reshape(-1)
+        if pos == 0:
+            # First window: score all tokens
+            scored = scored_losses
+            score_offset = win_start
+        else:
+            # Subsequent windows: only score the last stride tokens
+            scored = scored_losses[score_start:]
+            score_offset = win_start + score_start
+
+        total_loss_sum += float(np.sum(scored, dtype=np.float64))
+        num_scored = len(scored)
+        total_scored_tokens += num_scored
+
+        # BPB byte counting for scored tokens only
+        tgt_ids = val_tokens[score_offset + 1:score_offset + num_scored + 1]
+        prev_ids = val_tokens[score_offset:score_offset + num_scored]
+        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+        bytes_np += (
+            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        ).astype(np.int16, copy=False)
+        total_bytes += float(bytes_np.astype(np.float64).sum())
+
+        # Advance position
+        if pos == 0:
+            pos = seq_len
+        else:
+            pos = min(pos + stride, n_tokens)
+
+        if log_fn is not None and total_windows > 1 and (
+            window_idx == 1 or window_idx == total_windows or window_idx % 100 == 0
+        ):
+            log_fn(f"val_progress:{window_idx}/{total_windows}")
+
+    val_loss = total_loss_sum / total_scored_tokens
+    bits_per_token = val_loss / math.log(2.0)
+    val_bpb = bits_per_token * (total_scored_tokens / total_bytes)
+    return val_loss, val_bpb
+
+
 # -----------------------------
 # TRAINING
 # -----------------------------
@@ -963,6 +1081,7 @@ def main() -> None:
     # - compiled_loss_and_grad: forward + backward via nn.value_and_grad (used for training)
     # They cannot share a compiled graph because the backward pass changes the trace structure.
     compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_loss_per_token = mx.compile(lambda x, y: model.loss_per_token(x, y), inputs=model.state, outputs=model.state)
     compiled_loss_and_grad = mx.compile(
         nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
         inputs=model.state,
@@ -1047,6 +1166,12 @@ def main() -> None:
         y_val = mx.array(warm_chunk[1:].reshape(-1, args.train_seq_len), dtype=mx.int32)
         warm_val_loss = compiled_loss(x_val, y_val)
         mx.eval(warm_val_loss)
+        if args.eval_stride > 0:
+            # Also prime the per-token loss graph for sliding window eval (different shape: single seq)
+            x_single = mx.array(val_tokens[:args.train_seq_len].reshape(1, -1), dtype=mx.int32)
+            y_single = mx.array(val_tokens[1:args.train_seq_len + 1].reshape(1, -1), dtype=mx.int32)
+            warm_per_tok = compiled_loss_per_token(x_single, y_single)
+            mx.eval(warm_per_tok)
         mx.synchronize()
 
         train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
@@ -1148,15 +1273,26 @@ def main() -> None:
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
     q_t0 = time.perf_counter()
-    q_val_loss, q_val_bpb = eval_val(
-        args,
-        compiled_loss,
-        val_tokens,
-        base_bytes_lut,
-        has_leading_space_lut,
-        is_boundary_token_lut,
-        log_fn=log,
-    )
+    if args.eval_stride > 0:
+        q_val_loss, q_val_bpb = eval_val_sliding(
+            args,
+            compiled_loss_per_token,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+            log_fn=log,
+        )
+    else:
+        q_val_loss, q_val_bpb = eval_val(
+            args,
+            compiled_loss,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+            log_fn=log,
+        )
     q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)
     log(f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")
     log(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
