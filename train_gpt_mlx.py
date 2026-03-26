@@ -511,6 +511,10 @@ class Muon:
         else:
             momentum = self.args.muon_momentum
         lr = self.args.matrix_lr * lr_mul
+        # Warmdown-aware WD: increase WD as LR drops during warmdown.
+        # When lr_mul=1.0 (full LR), wd=base_wd. When lr_mul→0 (warmdown end), wd→2*base_wd.
+        # This counteracts the natural weakening of WD's effect as updates shrink.
+        wd = self.args.muon_weight_decay * (2.0 - lr_mul) if self.args.muon_weight_decay > 0 else 0.0
         out: dict[str, mx.array] = {}
         for k in self.keys:
             p = params[k]
@@ -521,8 +525,8 @@ class Muon:
             g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
             scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
             update = (g_ortho * scale).astype(p.dtype)
-            if self.args.muon_weight_decay > 0:
-                update = update + self.args.muon_weight_decay * p
+            if wd > 0:
+                update = update + wd * p
             out[k] = p - lr * update
         return out
 
