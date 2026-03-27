@@ -146,33 +146,37 @@ Multiple experiment sessions have been run. The current best and all learnings a
 ### Current Best (as of lab/mar26b session, 2026-03-26)
 
 ```
-commit: 6ed4a1d
-val_bpb: 1.8291 (Apple Silicon, 10L, TRAIN_BATCH_TOKENS=8192)
-artifact: 14.6MB (1.4MB headroom)
+commit: 18cf2e2
+val_bpb: 1.7504 (Apple Silicon, 10L, TRAIN_BATCH_TOKENS=8192)
+artifact: 9.9MB (6.1MB headroom)
 config:
   NUM_LAYERS=10
   INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb
-  MUON_WEIGHT_DECAY=0.02
+  MUON_WEIGHT_DECAY=0.10
   WARMDOWN_ITERS=1200 (default)
   TRAIN_BATCH_TOKENS=8192
+note: Warmdown-aware WD scheduling: wd = base_wd * (2 - lr_mul)
 ```
 
 ### Key Validated Insights (see EXPERIMENT_LOG.md for full details)
 
 - **10 layers > 9 layers**: ~0.05 BPB improvement, +1.2MB artifact. Non-negotiable.
-- **Muon WD=0.02**: -0.031 BPB AND -1.1MB artifact. Highest-impact single change.
+- **11 layers worse on Apple Silicon**: Better per-step but slower (~394ms vs ~352ms), fewer total steps in 600s. Try on 8xH100.
+- **Muon WD=0.10 optimal**: WD response: 0.00→1.860, 0.02→1.829, 0.05→1.788, 0.10→1.761. Still monotonically improving at 0.10.
+- **Warmdown-aware WD scheduling**: `wd = base_wd * (2 - lr_mul)`. Doubles WD during warmdown. Extra -0.010 BPB over constant WD.
 - **FP16 tok_emb**: Reduces quantization gap to +0.0001 BPB. +0.5MB artifact.
 - **Warmdown=1200 is optimal**: Reducing to 400 was WORSE on both BPB and artifact size. Acts as regularizer.
 - **Sliding window eval**: Implemented (`EVAL_STRIDE=64`), ~0.03 BPB gain. Too slow on Apple Silicon (~50min). Use for final submission on 8xH100 only.
 - **Never run experiments concurrently**: Unified memory contention degrades throughput 2-3x.
-- **Solo throughput**: ~1600 steps in 600s at ~370ms/step (10L, batch=8192).
-- **Weight decay improves compressibility**: Regularized weights compress better under zlib.
+- **Solo throughput**: ~1700 steps in 600s at ~352ms/step (10L, WD=0.10, batch=8192).
+- **Weight decay dramatically improves compressibility**: WD=0.10 reduced artifact from 15.7MB to 11.0MB. Warmdown sched further to 9.9MB.
 
 ### Failed Experiments (do NOT repeat)
 
 - **Warmdown=400**: Worse BPB (1.878 vs 1.861) AND artifact over 16MB (16.5MB). Long warmdown is good.
 - **INT8_KEEP_FLOAT_MAX_NUMEL=600000**: Accidentally kept all large tensors as FP16 (35MB artifact). Use name patterns instead.
 - **Concurrent runs on Apple Silicon**: 2-3x slower. Always run sequentially.
+- **11 layers on Apple Silicon**: Better per-step but slower, fewer total steps. Worse overall (1.783 vs 1.750).
 
 ### Original Baseline (for reference)
 
@@ -185,7 +189,7 @@ Unmodified train_gpt_mlx.py, 200 iterations:
 
 ### Experiment Numbering
 
-Previous sessions used exp_001 through exp_009. **Start new experiments at exp_010.**
+Previous sessions used exp_001 through exp_015. **Start new experiments at exp_016.**
 
 ## Tracking and Analysis
 

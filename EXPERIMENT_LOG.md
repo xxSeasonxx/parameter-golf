@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.8291** (commit `6ed4a1d`)
+**Final best**: val_bpb=**1.7504** (commit `18cf2e2`)
 
 ---
 
@@ -21,7 +21,13 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 006 | exp_006_10L_fp16emb | FP16 ALL tensors (bug) | 1622/2000 | 1.8655 | 35.2MB | Failed | INT8_KEEP_FLOAT_MAX_NUMEL=600k kept everything FP16 |
 | 007 | exp_007_10L_fp16tok | FP16 tok_emb only | 1629/2000 | 1.8605 | 15.7MB | Superseded | Correct FP16 approach; quant gap reduced to +0.0001 |
 | 008 | exp_008_wd400 | Warmdown=400 | 1636/2000 | 1.8779 | 16.5MB | Failed | Shorter warmdown HURTS both BPB and compressibility |
-| **009** | **exp_009_wd02** | **Muon WD=0.02** | **1604/2000** | **1.8291** | **14.6MB** | **BEST** | **WD improves BPB by 0.031 AND reduces artifact 1.1MB** |
+| **009** | **exp_009_wd02** | **Muon WD=0.02** | **1604/2000** | **1.8291** | **14.6MB** | **Superseded** | **WD improves BPB by 0.031 AND reduces artifact 1.1MB** |
+| 010 | exp_010_wd05 | Muon WD=0.05 (smoke) | 200/200 | 2.4145 | 12.1MB | Inconclusive | Marginal train_loss advantage at 200 iters |
+| 011 | exp_011_wd05_med | Muon WD=0.05 (medium) | 1692/2000 | 1.7883 | 13.2MB | Superseded | WD=0.05 > WD=0.02, benefit still increasing |
+| 012 | exp_012_wd10 | Muon WD=0.10 (smoke) | 200/200 | 2.4371 | 11.5MB | Inconclusive | Worse at 200 iters but late crossover expected |
+| 013 | exp_013_wd10_med | Muon WD=0.10 (medium) | 1682/2000 | 1.7608 | 11.0MB | Superseded | WD=0.10 > WD=0.05, massive compression benefit |
+| **014** | **exp_014_wd_sched** | **WD=0.10 + warmdown sched** | **1704/2000** | **1.7504** | **9.9MB** | **BEST** | **Warmdown-aware WD: wd*(2-lr_mul). -0.010 more BPB** |
+| 015 | exp_015_11L | 11 layers | 1524/2000 | 1.7833 | 11.0MB | Discard | 11L better per-step but slower (~394ms vs 352ms), fewer total steps |
 
 ---
 
@@ -115,13 +121,66 @@ if self.args.muon_weight_decay > 0:
 
 ---
 
+### Experiments 010-013: Weight Decay Sweep (WD=0.05, WD=0.10)
+
+**Hypothesis**: WD=0.02 gave -0.031 BPB. Is more WD better? The benefit function might be monotonically increasing.
+
+**What happened**:
+- WD=0.05 (exp_011): val_bpb=1.7883 — beat WD=0.02 by 0.041. Artifact: 13.2MB.
+- WD=0.10 (exp_013): val_bpb=1.7608 — beat WD=0.05 by 0.028. Artifact: 11.0MB.
+- Both followed the "worse early, better late" pattern: higher WD is worse at intermediate checkpoints but surpasses at convergence.
+
+**Learnings**:
+- WD benefit is **monotonically increasing** at least to 0.10. The response curve: 0.00→1.860, 0.02→1.829, 0.05→1.788, 0.10→1.761.
+- Higher WD dramatically improves compressibility: artifact went from 15.7MB (no WD) to 11.0MB (WD=0.10).
+- The late crossover happens later with higher WD — WD=0.10 catches WD=0.05 only after step 1500.
+- **Principle**: WD is a dual regularizer+compressor. The binding constraint (bits per parameter) means WD's compression benefit is as important as its BPB improvement.
+
+---
+
+### Experiment 014: Warmdown-Aware WD Scheduling (NEW BEST)
+
+**Hypothesis**: As LR drops during warmdown, WD's relative effect increases naturally. Amplify this by scheduling `wd = base_wd * (2.0 - lr_mul)`, so WD doubles from 0.10 to 0.20 over the warmdown phase. This concentrates regularization where our data shows it matters most.
+
+**Code change**: 4-line modification in `Muon.step()` — compute WD based on lr_mul instead of using constant.
+
+**What happened**:
+- val_bpb=**1.7504** — beat constant WD=0.10 by 0.0104.
+- Artifact=**9.9MB** — another 1.1MB reduction from the scheduling alone.
+- Slightly worse at step 1000 (+0.021) but caught up and surpassed at the end.
+
+**Learnings**:
+- Warmdown-aware WD scheduling works! The extra WD during warmdown pushes weights to a more compressible minimum.
+- This is a **novel technique**: nobody in the competition uses WD that varies with the LR schedule.
+- Total improvement from WD work (exp 009-014): **-0.110 BPB** and **-5.8MB artifact**.
+- 6.1MB headroom is now available for architectural changes.
+
+---
+
+### Experiment 015: 11 Layers (Discard)
+
+**Hypothesis**: With 6.1MB headroom, 11 layers should fit easily. More layers = more capacity.
+
+**What happened**:
+- val_bpb=1.7833 — **worse** than 10L's 1.7504.
+- 11L is slower per step (~394ms vs ~352ms for 10L), so only 1524 steps completed vs 1704.
+- At matched step counts, 11L is actually better (~0.04 BPB). But fewer total steps negates the advantage.
+
+**Learnings**:
+- On Apple Silicon with 600s wallclock, the binding constraint is step throughput, not artifact size.
+- 11L would likely win on 8xH100 where batch=524K dominates step time and the extra layer's cost is negligible.
+- For Apple Silicon experiments, stick with 10L and optimize per-step efficiency.
+
+---
+
 ## Code Changes Made to train_gpt_mlx.py
 
 All changes are in `train_gpt_mlx.py`. No other training files were modified.
 
-### 1. Muon Weight Decay (3 lines, used in best run)
+### 1. Muon Weight Decay with Warmdown-Aware Scheduling (used in best run)
 - Added `MUON_WEIGHT_DECAY` env var (default 0.0) to Hyperparameters
 - Added decoupled weight decay in `Muon.step()`: `update = update + wd * p`
+- Warmdown-aware scheduling: `wd = base_wd * (2.0 - lr_mul)` — WD doubles during warmdown phase
 
 ### 2. FP16 Embedding Quantization (6 lines, used in best run)
 - Added `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS` env var
@@ -142,20 +201,23 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 
 ### Architecture
 - **10 layers > 9 layers**: ~0.05 BPB improvement. +1.2MB artifact. Non-negotiable.
-- **Current headroom**: 14.6MB artifact, 1.4MB to spare.
+- **11 layers worse on Apple Silicon**: Better per-step but slower. Fewer total steps in 600s.
+- **Current headroom**: 9.9MB artifact, 6.1MB to spare.
 
 ### Optimization
-- **Muon WD=0.02**: -0.031 BPB AND -1.1MB artifact. The single highest-impact change.
+- **Muon WD=0.10**: WD response is monotonically increasing: 0.00→1.860, 0.02→1.829, 0.05→1.788, 0.10→1.761.
+- **Warmdown-aware WD scheduling**: `wd = base_wd * (2 - lr_mul)`. Extra -0.010 BPB and -1.1MB over constant WD.
 - **Warmdown=1200 is optimal**: Don't reduce. Acts as regularizer + improves compressibility.
+- **WD "worse early, better late" pattern**: Higher WD hurts at intermediate steps but wins at convergence. Crossover is ~step 1500.
 
 ### Quantization
 - **FP16 tok_emb**: Negligible BPB gain (+0.0001) but good practice. +0.5MB artifact.
-- **Weight decay improves compressibility**: Regularized weights compress better under zlib.
+- **Weight decay dramatically improves compressibility**: WD=0.10+sched reduced artifact from 15.7MB to 9.9MB.
 
 ### Training Dynamics (Apple Silicon)
-- **Solo throughput**: ~1600 steps in 600s at ~370ms/step (10L, batch=8192).
+- **Solo throughput**: ~1700 steps in 600s at ~352ms/step (10L, batch=8192, WD=0.10).
 - **Never run concurrent experiments**: 2-3x throughput degradation.
-- **Loss still decreasing at 1600 steps**: More data/steps would help.
+- **Loss still decreasing at 1700 steps**: More data/steps would help.
 
 ### Evaluation
 - **Sliding window (stride=64)**: Implemented, ~0.03 BPB improvement expected. Too slow on Mac (~50 min). Use on 8xH100 only.
@@ -166,22 +228,22 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 
 See `.lab/ideas_queue.md` for the full, detailed, and up-to-date research queue.
 
-### Tier 1: Original Research (Novel Approaches)
+### Tier 1: Original Research (Novel Approaches — highest priority)
 1. **Entropy-Guided Dynamic Precision** — Per-row bit allocation based on information content
-2. **Warmdown-Aware WD Scheduling** — WD scales inversely with LR during warmdown
-3. **Frequency-Decomposed Skip Gating** — Structured decomposition of U-Net skips
-4. **Compression-Aware Training** — Regularize directly for compressibility
-5. **Self-Compressing Orthogonal Init** — Structured low-entropy weight initialization
-6. **Progressive Layer Growing** — Start shallow, grow deep mid-training
+2. **Frequency-Decomposed Skip Gating** — Structured decomposition of U-Net skips
+3. **Self-Compressing Orthogonal Init** — Structured low-entropy weight initialization
+4. **Compression-Aware Training** — Regularize directly for compressibility (less urgent given WD success)
+5. **Progressive Layer Growing** — Start shallow, grow deep mid-training
 
 ### Tier 2: Informed Experiments (Our Twist)
-7. **Asymmetric MLP Capacity** — Wider MLPs in later layers
-8. **Attention Head Diversity** — Stochastic head masking as regularization
-9. **Muon Momentum Cycling** — Cosine-scheduled momentum
-10. **Dual-Phase Training** — Explore then exploit with different optimizer configs
+6. **Asymmetric MLP Capacity** — Wider MLPs in later layers
+7. **Attention Head Diversity** — Stochastic head masking as regularization
+8. **Muon Momentum Cycling** — Cosine-scheduled momentum
+9. **Dual-Phase Training** — Explore then exploit with different optimizer configs
 
-### Tier 3: Quick Sweeps
-11. Higher Muon WD (0.05, 0.1), Larger batch, 11 layers, RoPE base, QK gain
+### Tier 3: Quick Sweeps (remaining)
+10. Larger batch (16K, 32K), RoPE base, QK gain
+11. **WD=0.20** — benefit may still be increasing (quick env var test)
 
 ---
 
@@ -190,13 +252,14 @@ See `.lab/ideas_queue.md` for the full, detailed, and up-to-date research queue.
 When porting the best config to `train_gpt.py` for competition submission:
 
 ### Must port (code changes needed)
-1. **Muon weight decay**: PyTorch Muon has NO WD. Add the same 3-line change.
+1. **Muon weight decay with warmdown scheduling**: PyTorch Muon has NO WD. Add WD + the `wd = base_wd * (2 - lr_mul)` schedule.
 2. **FP16 tok_emb**: Add `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS` logic to PyTorch quantization.
 3. **Sliding window eval**: Port `eval_val_sliding()` to PyTorch. Eval time is free on 8xH100.
 
 ### Just set env vars
-4. `NUM_LAYERS=10` — already supported
-5. `WARMDOWN_ITERS=1200` — already the default
+4. `NUM_LAYERS=10` (or try `NUM_LAYERS=11` — likely better on 8xH100 where step time is batch-dominated)
+5. `MUON_WEIGHT_DECAY=0.10`
+6. `WARMDOWN_ITERS=1200` — already the default
 
 ### Expected 8xH100 performance
 - Batch: 524,288 tokens/step (64x more than Apple Silicon's 8192)
