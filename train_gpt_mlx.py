@@ -87,6 +87,7 @@ class Hyperparameters:
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
     freq_skip_gating: bool = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
     freq_skip_window: int = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
+    head_drop: float = float(os.environ.get("HEAD_DROP", 0.0))  # DropHead: probability of zeroing entire attention heads during training
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -331,6 +332,7 @@ class CausalSelfAttention(nn.Module):
         num_kv_heads: int,
         rope_base: float,
         qk_gain_init: float,
+        head_drop: float = 0.0,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -340,6 +342,7 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = dim // num_heads
+        self.head_drop = head_drop
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
         kv_dim = self.num_kv_heads * self.head_dim
@@ -365,6 +368,10 @@ class CausalSelfAttention(nn.Module):
         # mx.fast.scaled_dot_product_attention dispatches to Metal-optimized attention kernels.
         # mask="causal" enables the fused causal mask path (no explicit mask tensor needed).
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
+        # DropHead: zero entire attention heads during training to force head diversity
+        if self.training and self.head_drop > 0:
+            mask = mx.random.bernoulli(1.0 - self.head_drop, shape=(1, self.num_heads, 1, 1))
+            y = y * mask / (1.0 - self.head_drop)
         y = y.transpose(0, 2, 1, 3).reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -391,11 +398,12 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
+        head_drop: float = 0.0,
     ):
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
         self.mlp_norm = RMSNormNoWeight()
-        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
+        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init, head_drop)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
@@ -417,7 +425,8 @@ class GPT(nn.Module):
     # - tied embeddings for the LM head (the baseline default setup)
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32):
+                 qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
+                 head_drop: float = 0.0):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -436,7 +445,7 @@ class GPT(nn.Module):
         else:
             self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init, head_drop)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -1091,6 +1100,7 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
+        head_drop=args.head_drop,
     )
     opt = SplitOptimizers(model, args)
 
@@ -1216,6 +1226,7 @@ def main() -> None:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
             train_time_ms += 1000.0 * (time.perf_counter() - t0)
+            model.eval()
             # Validation always scans the same fixed full validation split.
             val_loss, val_bpb = eval_val(
                 args,
@@ -1226,6 +1237,7 @@ def main() -> None:
                 is_boundary_token_lut,
                 log_fn=log,
             )
+            model.train()
             if step % 25 == 0 or last_step:
                 log(
                     f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -1303,6 +1315,7 @@ def main() -> None:
         quant_blob_disk = f.read()
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
+    model.eval()
     q_t0 = time.perf_counter()
     if args.eval_stride > 0:
         q_val_loss, q_val_bpb = eval_val_sliding(

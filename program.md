@@ -143,7 +143,7 @@ For each queued idea: does the new result make it more promising (move up), less
 ### 5. DECIDE (compare against ALL-TIME BEST in insights.md)
 
 - **val_bpb lower than best** → this is a NEW BEST. Update `results.tsv` to `keep`. Update `insights.md` current best.
-- **val_bpb equal or higher** → DISCARD. Update `results.tsv` to `discard`. Restore the best code: `cp .lab/<best_commit>/train_gpt_mlx.py ./train_gpt_mlx.py`. Git commit the revert.
+- **val_bpb equal or higher** → DISCARD. Update `results.tsv` to `discard`. Restore the best code from its archived snapshot: `cp .lab/<best_commit>/train_gpt_mlx.py ./train_gpt_mlx.py`. Git commit the revert.
 
 ### 6. IMPLEMENT
 Read `insights.md` and `ideas_queue.md`. Pick the top idea. Modify `train_gpt_mlx.py`.
@@ -172,13 +172,17 @@ Loss should start ~6.93 (ln(1024)) and decrease. Red flags: NaN, Inf, loss stuck
 
 If a novel idea is >0.1 BPB worse than baseline at same step count, **suspect a bug first**. Never discard an idea on a crashed/NaN run — fix the bug and retry.
 
-### 7. RUN
+### 7. COMMIT & RUN
+**Always git commit before running.** This ensures the run is tied to a specific code snapshot. Use a descriptive message with the experiment ID and hypothesis (e.g., `exp_025: test layer-wise LR decay`). `analyze.py` will archive `train_gpt_mlx.py` into `.lab/<commit>/` after the run, so every experiment has a reproducible code snapshot.
+
 Launch with the appropriate tier (smoke or medium).
 
 ### 8. POST-RUN
 ```bash
 conda run -n openai --no-capture-output python3 analyze.py
 ```
+This archives the run into `.lab/<commit>/` including: `run.log`, `train_gpt_mlx.py` (code snapshot), `analysis.md`, and plots. Every past experiment's exact code is recoverable from `.lab/<commit>/train_gpt_mlx.py`.
+
 Then update **all** state files:
 - **`.lab/results.tsv`** — append a row with the result
 - **`EXPERIMENT_LOG.md`** — append to the summary table AND write a detailed narrative
