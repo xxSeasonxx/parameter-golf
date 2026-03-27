@@ -2,7 +2,7 @@
 
 This document instructs an AI agent to autonomously run experiments on the parameter-golf challenge, iteratively improving val_bpb on Apple Silicon using `train_gpt_mlx.py`.
 
-**The goal is simple: get the lowest val_bpb.** The training script runs for a fixed wall-clock budget of 10 minutes. Everything is fair game: architecture, optimizer, hyperparameters, batch size, model size, quantization strategy. The only hard constraints are the 16MB artifact limit and the time budget.
+**The goal is simple: get the lowest val_bpb on 8xH100 (RunPod).** Apple Silicon is our development environment for fast iteration, but the real competition runs on 8xH100 with 64x more data per step. An idea that wins on Mac usually wins on GPU too — but keep in mind that some tradeoffs differ (e.g. 11 layers is too slow on Mac but likely better on 8xH100 where step time is batch-dominated). The only hard constraints are the 16MB artifact limit and the 10-minute time budget.
 
 ## Setup (once per session)
 
