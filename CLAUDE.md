@@ -60,3 +60,4 @@ conda run -n openai --no-capture-output python3 -m pytest test_analyze.py -v
 - Artifact must be < 16,000,000 bytes after int8+zlib
 - Be a researcher, not a copier — develop original ideas
 - Never run experiments concurrently on Apple Silicon
+- Do NOT read `record/` — those are other teams' submissions. We develop our own approaches independently.
