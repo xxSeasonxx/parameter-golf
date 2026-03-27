@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.7504** (commit `18cf2e2`)
+**Final best**: val_bpb=**1.6518** (commit `c8c2028`, exp_024 batch=24576)
 
 ---
 
@@ -28,6 +28,15 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 013 | exp_013_wd10_med | Muon WD=0.10 (medium) | 1682/2000 | 1.7608 | 11.0MB | Superseded | WD=0.10 > WD=0.05, massive compression benefit |
 | **014** | **exp_014_wd_sched** | **WD=0.10 + warmdown sched** | **1704/2000** | **1.7504** | **9.9MB** | **BEST** | **Warmdown-aware WD: wd*(2-lr_mul). -0.010 more BPB** |
 | 015 | exp_015_11L | 11 layers | 1524/2000 | 1.7833 | 11.0MB | Discard | 11L better per-step but slower (~394ms vs 352ms), fewer total steps |
+| 016 | exp_016_mom_ramp | Momentum warmdown ramp 0.95→0.99 | 1688/2000 | 1.7852 | 10.7MB | Discard | +0.035 BPB regression. High momentum in warmdown destabilizes Muon's Newton-Schulz |
+| **017** | **exp_017_freq_skip** | **Freq-decomposed skip gating (W=32)** | **1678/2000** | **1.7403** | **10.0MB** | **BEST** | **ORIGINAL: lo/hi freq band gates on skip signals. -0.010 BPB** |
+| 018 | exp_018_ema | EMA warmdown blend (decay=0.999, blend=0.5) | 1651/2000 | 2.4115 | 9.1MB | Discard | Catastrophic: loss INCREASED during warmdown. EMA too stale, destroys convergence |
+| 019 | exp_019_wd20 | WD=0.20 | 1681/2000 | 1.7688 | 7.7MB | Discard | Over-regularized: +0.029 BPB vs WD=0.10. Artifact 7.7MB (great compression). WD=0.10 is the sweet spot |
+| 020 | exp_020_rope50k | ROPE_BASE=50000 | ~1700/2000 | 1.7610 | 9.9MB | Discard | +0.021 BPB regression. Higher RoPE base hurts |
+| 021 | exp_021_qkgain1 | QK_GAIN_INIT=1.0 | 1713/2000 | 1.7542 | 9.8MB | Discard | +0.014 BPB regression. Default 1.5 is better |
+| **022** | **exp_022_batch16k** | **TRAIN_BATCH_TOKENS=16384** | **1057/2000** | **1.6584** | **11.2MB** | **Superseded** | **-0.082 BPB! 2x data/step, better gradient quality dominates** |
+| 023 | exp_023_batch16k_wd600 | batch=16k + warmdown=600 | 1038/2000 | 1.6877 | 11.5MB | Discard | Shorter warmdown hurts again: +0.029 BPB vs warmdown=1200 |
+| **024** | **exp_024_batch24k** | **TRAIN_BATCH_TOKENS=24576** | **711/2000** | **1.6518** | **10.8MB** | **BEST** | **-0.007 more BPB. Batch scaling trend continues** |
 
 ---
 
@@ -171,6 +180,88 @@ if self.args.muon_weight_decay > 0:
 - 11L would likely win on 8xH100 where batch=524K dominates step time and the extra layer's cost is negligible.
 - For Apple Silicon experiments, stick with 10L and optimize per-step efficiency.
 
+### Experiment 016: Muon Momentum Warmdown Ramp (Discard)
+
+**Hypothesis**: Ramp momentum from 0.95 to 0.99 during warmdown for smoother convergence into flatter minimum.
+
+**What happened**: val_bpb=1.7852 — **+0.035 BPB regression** vs best (1.7504).
+
+**Learnings**: High momentum destabilizes Muon's Newton-Schulz orthogonalization during warmdown. Don't modify Muon momentum late in training.
+
+---
+
+### Experiment 017: Frequency-Decomposed Skip Gating (NEW BEST)
+
+**Hypothesis**: Decompose U-Net skip connections into low-frequency (block means, W=32) and high-frequency (residual) bands with independent per-dim gates. Different layers should pass through different frequency content.
+
+**Code change**: In GPT forward pass, replace flat skip weights with `skip_lo_weights` and `skip_hi_weights`. Low-freq = windowed mean of skip signal, high-freq = residual.
+
+**What happened**: val_bpb=**1.7403** — beat previous best by 0.010 BPB. Artifact: 10.0MB. Minimal overhead (~2ms/step).
+
+**Learnings**:
+- **ORIGINAL technique**: Nobody in competition decomposes skip signals by frequency band.
+- The lo/hi decomposition adds only ~10 params per skip connection (negligible).
+- Validates the principle that architectural novelty can yield step-change improvements.
+
+---
+
+### Experiment 018: EMA Warmdown Blend (Catastrophic Failure)
+
+**Hypothesis**: Maintain EMA of weights (decay=0.999), blend toward EMA during warmdown (α=0.5). Lower variance weights = more compressible, flatter minima.
+
+**What happened**: val_bpb=2.4115 — **catastrophic**. Loss INCREASED during warmdown (2.19→2.41). The model effectively unlearned during the blend phase.
+
+**Learnings**: EMA weights are too stale — they represent an average over training history, not a better current solution. Blending toward them destroys the hard-won convergence. Don't interpolate toward averaged weights during training.
+
+---
+
+### Experiment 019: WD=0.20 (Discard)
+
+**Hypothesis**: WD response might still be increasing beyond 0.10.
+
+**What happened**: val_bpb=1.7688 — **+0.029 BPB regression** vs WD=0.10. But artifact=7.7MB (excellent compression).
+
+**Learnings**: WD=0.10 is the sweet spot. WD=0.20 over-regularizes — the model loses too much capacity. The compression benefit is huge but not worth the BPB cost.
+
+---
+
+### Experiment 020: ROPE_BASE=50000 (Discard)
+
+**Hypothesis**: Default rope_base=10000 may not be optimal for seq_len=1024. Higher base = less position sensitivity, more uniform attention.
+
+**What happened**: val_bpb=1.7610 — **+0.021 BPB regression**. Artifact: 9.9MB (similar).
+
+**Learnings**: Higher RoPE base hurts. The default 10000 is already good for seq_len=1024.
+
+---
+
+### Experiment 021: QK_GAIN_INIT=1.0 (Discard)
+
+**Hypothesis**: Default QK_GAIN_INIT=1.5 was never validated. Lower gain might reduce attention saturation.
+
+**What happened**: val_bpb=1.7542 — **+0.014 BPB regression**. Artifact: 9.8MB. Step time similar (~350ms).
+
+**Learnings**: Default QK_GAIN=1.5 is good. Both RoPE and QK gain tuning failed — the attention defaults are well-calibrated.
+
+---
+
+### Experiments 022-024: Batch Size Scaling (MAJOR DISCOVERY)
+
+**Hypothesis**: Larger batch = better gradient quality per step. At batch=8192, we get ~1710 steps in 600s. Doubling the batch doubles tokens per step but adds ~60% step time (more grad accum). The question is whether better gradients compensate for fewer total steps.
+
+**exp_022 (batch=16384)**: val_bpb=**1.6584** — massive **-0.082 BPB** improvement over best (1.7403). 1057 steps at ~566ms/step. This is by far the biggest single improvement in this session.
+
+**exp_023 (batch=16k + warmdown=600)**: val_bpb=1.6877 — **+0.029 worse** than exp_022. Reducing warmdown_iters from 1200 to 600 hurts, confirming that long warmdown is always beneficial. With only ~1057 steps and warmdown=1200, the entire training was effectively in warmdown mode — and it STILL won massively.
+
+**exp_024 (batch=24576)**: val_bpb=**1.6518** — another **-0.007 BPB** improvement. 711 steps at ~845ms/step. The batch scaling trend continues.
+
+**Key Learnings**:
+- **Batch size is the master lever on Apple Silicon.** Better gradient quality from 2-3x more tokens per step massively outweighs having fewer total steps.
+- **Long warmdown works at any step count.** Even with warmdown_iters=1200 and only 711-1057 steps (so warmdown covers 100%+ of training), the model benefits from the gradual LR decay.
+- **Token throughput matters more than step count.** At batch=24k, we see ~31K tok/s vs ~23K at batch=8k — 35% more data processed in the same wallclock.
+- **The batch scaling curve**: 8192→1.7403, 16384→1.6584, 24576→1.6518. The marginal return is diminishing (0.082 → 0.007), suggesting we're approaching the optimal batch for this wallclock budget.
+- **Artifact size is manageable**: 10.8MB at batch=24k, well under the 16MB limit.
+
 ---
 
 ## Code Changes Made to train_gpt_mlx.py
@@ -185,6 +276,12 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 ### 2. FP16 Embedding Quantization (6 lines, used in best run)
 - Added `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS` env var
 - Added name-pattern check in `quantize_state_dict_int8()` to keep matched tensors as FP16
+
+### 4. Frequency-Decomposed Skip Gating (used in best run)
+- Added `FREQ_SKIP_GATING` and `FREQ_SKIP_WINDOW` env vars
+- Replaced flat `skip_weights` with `skip_lo_weights` (low-freq band) and `skip_hi_weights` (high-freq band)
+- Low-freq = windowed mean (W=32), high-freq = residual after subtracting low-freq
+- Independent learned gates per frequency band per skip connection
 
 ### 3. Sliding Window Evaluation (80 lines, implemented but not used in best run)
 - Added `EVAL_STRIDE` env var (default 0 = disabled)

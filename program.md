@@ -177,6 +177,13 @@ Launch with the appropriate tier (smoke or medium).
 ```bash
 conda run -n openai --no-capture-output python3 analyze.py
 ```
+Then update **all** state files:
+- **`.lab/results.tsv`** — append a row with the result
+- **`EXPERIMENT_LOG.md`** — append to the summary table AND write a detailed narrative
+- **`.lab/insights.md`** — update current best if applicable, add new learnings
+- **`.lab/ideas_queue.md`** — mark completed ideas, kill disproven ones, add new ideas
+
+Do NOT batch these updates. Update after EVERY run before starting the next.
 
 ### 9. REPEAT
 Go back to step 0.

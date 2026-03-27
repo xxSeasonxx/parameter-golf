@@ -1,0 +1,19 @@
+commit	val_bpb	artifact_bytes	status	description
+5ea26fb	2.414581	12460674	discard	10L smoke test (200 iters)
+66e9b97	1.947034	14629073	discard	10L medium (concurrent run)
+130d7a6	1.860496	15710719	discard	10L+FP16 tok_emb (no WD)
+6ed4a1d	1.829112	14649031	keep	10L+FP16 tok_emb+Muon WD=0.02 — NEW BEST
+384185d	2.414526	12112870	discard	exp_010: WD=0.05 smoke test (200 iters)
+384185d	1.788251	13176793	keep	exp_011: 10L+FP16 tok_emb+Muon WD=0.05 — NEW BEST
+384185d	1.760833	10984690	keep	exp_013: 10L+FP16 tok_emb+Muon WD=0.10 — NEW BEST
+18cf2e2	1.750383	9940190	keep	exp_014: WD=0.10 + warmdown-aware scheduling — NEW BEST
+18cf2e2	1.783287	11028585	discard	exp_015: 11L — slower per-step, fewer total steps, worse than 10L
+18cf2e2	1.785209	10737596	discard	exp_016: momentum warmdown ramp 0.95→0.99 — +0.035 BPB regression
+c8c2028	1.740320	9956968	keep	exp_017: freq-decomposed skip gating (W=32) — NEW BEST
+c8c2028	2.411500	9142707	discard	exp_018: EMA warmdown blend — catastrophic, loss increased during warmdown
+c8c2028	1.768787	7700220	discard	exp_019: WD=0.20 — over-regularized +0.029 BPB, great compression 7.7MB
+c8c2028	1.760961	9872332	discard	exp_020: ROPE_BASE=50000 — +0.021 BPB regression vs default 10000
+c8c2028	1.754235	9825035	discard	exp_021: QK_GAIN_INIT=1.0 — +0.014 BPB regression vs default 1.5
+c8c2028	1.658359	11174531	keep	exp_022: TRAIN_BATCH_TOKENS=16384 — NEW BEST -0.082 BPB! 1057 steps, gradient quality wins
+c8c2028	1.687706	11481740	discard	exp_023: batch=16k + warmdown=600 — +0.029 BPB worse than warmdown=1200. Long warmdown wins again
+c8c2028	1.651780	10804460	keep	exp_024: TRAIN_BATCH_TOKENS=24576 — NEW BEST -0.007 BPB. Batch scaling continues
