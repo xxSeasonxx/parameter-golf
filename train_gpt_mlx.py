@@ -85,6 +85,8 @@ class Hyperparameters:
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
+    freq_skip_gating: bool = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
+    freq_skip_window: int = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -415,7 +417,7 @@ class GPT(nn.Module):
     # - tied embeddings for the LM head (the baseline default setup)
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float):
+                 qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -426,7 +428,13 @@ class GPT(nn.Module):
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
-        self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        self.freq_skip_gating = freq_skip_gating
+        self.freq_skip_window = freq_skip_window
+        if freq_skip_gating:
+            self.skip_lo_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+            self.skip_hi_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        else:
+            self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         self.blocks = [
             Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
             for i in range(num_layers)
@@ -457,7 +465,17 @@ class GPT(nn.Module):
             # applies a skip connection when one exists, then runs the remaining decoder block(s)
             # without an added skip.
             if skips:
-                x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skips.pop()
+                skip = skips.pop()
+                if self.freq_skip_gating:
+                    W = self.freq_skip_window
+                    # Decompose: low-freq = block means, high-freq = residual
+                    s = skip.reshape(*skip.shape[:-1], -1, W)
+                    lo = mx.repeat(s.mean(axis=-1, keepdims=True), W, axis=-1).reshape(skip.shape)
+                    hi = skip - lo
+                    x = x + (self.skip_lo_weights[i].astype(x.dtype)[None, None, :] * lo +
+                             self.skip_hi_weights[i].astype(x.dtype)[None, None, :] * hi)
+                else:
+                    x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skip
             x = self.blocks[self.num_encoder_layers + i](x, x0)
         return self.final_norm(x)
 
@@ -548,7 +566,7 @@ class SplitOptimizers:
         self.scalar_keys = [
             k
             for k, p in params.items()
-            if k == "skip_weights" or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
+            if k in ("skip_weights", "skip_lo_weights", "skip_hi_weights") or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
         ]
 
         self.muon = Muon(self.matrix_keys, params, args)
@@ -1071,6 +1089,8 @@ def main() -> None:
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
         qk_gain_init=args.qk_gain_init,
+        freq_skip_gating=args.freq_skip_gating,
+        freq_skip_window=args.freq_skip_window,
     )
     opt = SplitOptimizers(model, args)
 
@@ -1137,7 +1157,7 @@ def main() -> None:
     log(
         f"dtypes tok_emb:{model.tok_emb.weight.dtype} "
         f"linear_weight:{model.blocks[0].attn.c_q.weight.dtype} "
-        f"skip_weights:{model.skip_weights.dtype}"
+        f"skip_weights:{model.skip_lo_weights.dtype if model.freq_skip_gating else model.skip_weights.dtype}"
     )
 
     # ==============================================================================
