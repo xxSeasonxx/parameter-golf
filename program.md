@@ -63,13 +63,15 @@ Get current best env vars from `.lab/insights.md` (under "Best config env vars")
 
 ```bash
 # Smoke test (~2 min) — for untested ideas
-RUN_ID=exp_NNN <BEST_CONFIG_VARS> ITERATIONS=200 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 \
+RUN_ID=exp_NNN <BEST_CONFIG_VARS> ITERATIONS=200 VAL_LOSS_EVERY=0 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
 
 # Medium run (~15-20 min including eval) — for promising changes
-RUN_ID=exp_NNN <BEST_CONFIG_VARS> ITERATIONS=2000 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=500 \
+RUN_ID=exp_NNN <BEST_CONFIG_VARS> ITERATIONS=2000 VAL_LOSS_EVERY=500 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
 ```
+
+Note: `TRAIN_BATCH_TOKENS` is part of `<BEST_CONFIG_VARS>` from `.lab/insights.md`. Do NOT hardcode it here — it changes as we optimize.
 
 **Tiered approach**: Always start with a smoke test. If the change looks promising (loss trending better at same step count), promote to medium. Only do a full run (10000+ iters) for changes showing clear medium-scale improvement.
 

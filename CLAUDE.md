@@ -17,9 +17,8 @@ conda run -n openai --no-capture-output <command>
 # Data (10 shards for local dev)
 conda run -n openai --no-capture-output python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
 
-# Training — see .lab/insights.md for current best env vars
-RUN_ID=exp_NNN NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.1 \
-  ITERATIONS=2000 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=500 \
+# Training — see .lab/insights.md for BEST_CONFIG_VARS (batch size, WD, etc.)
+RUN_ID=exp_NNN <BEST_CONFIG_VARS> ITERATIONS=2000 VAL_LOSS_EVERY=500 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
 
 # Post-run analysis
