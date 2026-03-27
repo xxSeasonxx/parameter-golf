@@ -194,56 +194,7 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 
 ---
 
-## Validated Insights (Carry Forward)
-
-> See `.lab/insights.md` for the authoritative, always-up-to-date version of these insights.
-> The insights below are a snapshot from the end of the lab/mar26b session.
-
-### Architecture
-- **10 layers > 9 layers**: ~0.05 BPB improvement. +1.2MB artifact. Non-negotiable.
-- **11 layers worse on Apple Silicon**: Better per-step but slower. Fewer total steps in 600s.
-- **Current headroom**: 9.9MB artifact, 6.1MB to spare.
-
-### Optimization
-- **Muon WD=0.10**: WD response is monotonically increasing: 0.00→1.860, 0.02→1.829, 0.05→1.788, 0.10→1.761.
-- **Warmdown-aware WD scheduling**: `wd = base_wd * (2 - lr_mul)`. Extra -0.010 BPB and -1.1MB over constant WD.
-- **Warmdown=1200 is optimal**: Don't reduce. Acts as regularizer + improves compressibility.
-- **WD "worse early, better late" pattern**: Higher WD hurts at intermediate steps but wins at convergence. Crossover is ~step 1500.
-
-### Quantization
-- **FP16 tok_emb**: Negligible BPB gain (+0.0001) but good practice. +0.5MB artifact.
-- **Weight decay dramatically improves compressibility**: WD=0.10+sched reduced artifact from 15.7MB to 9.9MB.
-
-### Training Dynamics (Apple Silicon)
-- **Solo throughput**: ~1700 steps in 600s at ~352ms/step (10L, batch=8192, WD=0.10).
-- **Never run concurrent experiments**: 2-3x throughput degradation.
-- **Loss still decreasing at 1700 steps**: More data/steps would help.
-
-### Evaluation
-- **Sliding window (stride=64)**: Implemented, ~0.03 BPB improvement expected. Too slow on Mac (~50 min). Use on 8xH100 only.
-
----
-
-## What to Try Next (Prioritized)
-
-See `.lab/ideas_queue.md` for the full, detailed, and up-to-date research queue.
-
-### Tier 1: Original Research (Novel Approaches — highest priority)
-1. **Entropy-Guided Dynamic Precision** — Per-row bit allocation based on information content
-2. **Frequency-Decomposed Skip Gating** — Structured decomposition of U-Net skips
-3. **Self-Compressing Orthogonal Init** — Structured low-entropy weight initialization
-4. **Compression-Aware Training** — Regularize directly for compressibility (less urgent given WD success)
-5. **Progressive Layer Growing** — Start shallow, grow deep mid-training
-
-### Tier 2: Informed Experiments (Our Twist)
-6. **Asymmetric MLP Capacity** — Wider MLPs in later layers
-7. **Attention Head Diversity** — Stochastic head masking as regularization
-8. **Muon Momentum Cycling** — Cosine-scheduled momentum
-9. **Dual-Phase Training** — Explore then exploit with different optimizer configs
-
-### Tier 3: Quick Sweeps (remaining)
-10. Larger batch (16K, 32K), RoPE base, QK gain
-11. **WD=0.20** — benefit may still be increasing (quick env var test)
+> **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---
 
