@@ -29,3 +29,4 @@ cb8781e	1.7601	12591903	discard	exp_037: SWA (uniform avg 60 snapshots, lr_mul<0
 3e188d1	1.6316	13128949	discard	exp_043: LAYER_LR_SCALE=1.0 — +0.0005 vs best. Scale saturates, 0.5 sufficient
 b6c858e	1.6318	13073447	discard	exp_044: FREQ_SKIP_WINDOW=16 — +0.0007 vs best. Window size doesn't matter, W=32 fine
 e9428c5	1.6345	14035696	discard	exp_045: NUM_KV_HEADS=2 — +0.003 BPB vs best, worse compression (3.64x vs 3.85x). DISCARD
+966ddeb	1.6309	13065155	keep	exp_046: WARMUP_STEPS=50 — MARGINAL NEW BEST (-0.0002 vs 1.6311)

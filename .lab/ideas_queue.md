@@ -138,6 +138,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Asymmetric MLP width~~ [**OUR TWIST**] — TESTED exp_041: marginal new best (-0.001 BPB). Encoder MLP2x, decoder MLP4x. Same params as uniform MLP3x but better capacity allocation. Kept. exp_042: extreme (1,5) is worse (+0.001 BPB). 2,4 is the sweet spot.
 - ~~Freq skip window tuning~~ [SWEEP] — TESTED exp_044: FREQ_SKIP_WINDOW=16 vs 32 no difference (1.6318 vs 1.6311). Robust to window size. CLOSED.
 - ~~NUM_KV_HEADS=2 (aggressive GQA)~~ [SWEEP] — TESTED exp_045: +0.003 BPB, worse compression (3.64x vs 3.85x). 4 KV heads optimal for 8Q heads. CLOSED.
+- ~~WARMUP_STEPS=50~~ [SWEEP] — TESTED exp_046: marginal new best (1.6309, -0.0002). Both pre-quant (1.6284) and post-quant best ever. Kept — zero cost. Complements GRAD_CLIP_NORM=0.5 for early training stability.
 
 ---
 

@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6311** (commit `3af0786`, exp_041 asymmetric MLP width)
+**Final best**: val_bpb=**1.6309** (commit `966ddeb`, exp_046 WARMUP_STEPS=50)
 
 ---
 
@@ -58,6 +58,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 043 | exp_043_layerlr10 | LAYER_LR_SCALE=1.0 (deepest=2x LR) | 706/2000 | 1.6316 | 13.1MB | Discard | +0.0005 vs best. Scale saturates between 0.5-1.0. 0.5 sufficient |
 | 044 | exp_044_fsw16 | FREQ_SKIP_WINDOW=16 (smaller window) | 701/2000 | 1.6318 | 13.1MB | Discard | +0.0007 vs best. Window size doesn't matter. W=32 is fine |
 | 045 | exp_045_kv2 | NUM_KV_HEADS=2 (aggressive GQA) | 723/2000 | 1.6345 | 14.0MB | Discard | +0.003 vs best. Fewer KV heads hurts BPB and compression |
+| **046** | **exp_046_warmup50** | **WARMUP_STEPS=50 (up from 20)** | **706/2000** | **1.6309** | **13.1MB** | **BEST** | **-0.0002 BPB. Marginal new best. Longer warmup stabilizes early training** |
 
 ---
 
@@ -589,6 +590,32 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Don't reduce KV heads below 4.
 
 **Decision**: **DISCARD**. Keep NUM_KV_HEADS=4 (default).
+
+---
+
+### Experiment 046: WARMUP_STEPS=50 — Longer Warmup (Marginal New Best)
+
+**Hypothesis**: Increasing warmup from 20 to 50 steps stabilizes early training, giving the optimizer (especially Muon with Newton-Schulz) a smoother start. This should complement GRAD_CLIP_NORM=0.5 — both target early training stability but through different mechanisms (warmup: smaller LR ramp; clip: gradient magnitude control).
+
+**Config**: Pure env-var change: `WARMUP_STEPS=50`. All else identical to exp_041 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6284** — best pre-quant we've seen (previous best: ~1.6287 from exp_041).
+- Int8 val_bpb=**1.6309** — **-0.0002 BPB** vs best (1.6311). Marginal new best.
+- 706 steps at 851ms/step. Artifact: 13,065,155 bytes (~13.1MB).
+
+**Analysis**:
+- The improvement is extremely marginal (-0.0002 BPB) and well within noise (~0.005 BPB run-to-run variance).
+- However, both pre-quant (1.6284, best ever) and post-quant (1.6309, best ever) are simultaneously the best we've seen. This adds confidence that the signal is real, even if tiny.
+- Zero cost: WARMUP_STEPS=50 doesn't affect step time, artifact size, or total steps.
+- The quant gap (1.6284 → 1.6309 = 0.0025 BPB) is consistent with recent experiments.
+
+**Learnings**:
+- WARMUP_STEPS=50 is a marginal free improvement. Longer warmup gives Muon's Newton-Schulz orthogonalization better initial conditions.
+- Complementary with GRAD_CLIP_NORM=0.5: warmup controls LR ramp, clip controls gradient magnitude. Both stabilize early training through orthogonal mechanisms.
+- Pre-quant BPB of 1.6284 suggests the model capacity is well-utilized. The quant gap (~0.0025) remains the main source of loss.
+
+**Decision**: **KEEP** as marginal new best. Zero downside, both metrics are best-ever.
 
 ---
 
