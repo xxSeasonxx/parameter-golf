@@ -65,11 +65,12 @@ Prioritized by expected impact. Organized by research direction, not just parame
 
 ## Tier 2: Foundation + Known Wins (for 8xH100)
 
-### 5. SWA (Stochastic Weight Averaging) [KNOWN]
-**Hypothesis**: Average the last N checkpoints during warmdown. Unlike our FAILED EMA blending (exp_018), SWA averages discrete checkpoints at the END, not a running average blended during training. This is fundamentally different and proven to work.
-**Why different from killed EMA**: EMA blending interpolated toward stale averaged weights during training → catastrophic. SWA just averages final checkpoints after training → safe.
-**Expected impact**: -0.005 to -0.01 BPB.
-**Effort**: Low. Already in train_gpt.py, just port.
+### 5. ~~SWA Wide Window (lr_mul<0.5)~~ [KNOWN] — TESTED exp_037: FAILED
+**Result**: val_bpb=1.7601 (+0.127 regression). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) is catastrophic. Pre-SWA model was 1.6288.
+**Root cause**: Window too wide. Weights at step 350 and step 706 are too different — averaging them creates a blurry mess.
+**Variant to try**: **Narrow SWA (lr_mul<0.1, last ~70 steps)** or exponential weighting favoring later snapshots. Competition uses last 100-120 steps only.
+**Expected impact of narrow variant**: -0.005 to -0.01 BPB.
+**Effort**: Low. Just change the threshold.
 
 ### 6. Int6 Quantization [KNOWN]
 **Hypothesis**: 6-bit quantization for MLP/attention weights. Fits ~40% more effective params in 16MB.
@@ -133,6 +134,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Batch scaling~~ [SWEEP] — DONE: batch=24576 optimal on Mac. Marginal returns above this.
 - ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
 - ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
+- ~~SWA wide window (lr_mul<0.5)~~ [KNOWN] — TESTED exp_037: FAILED (+0.127 BPB). Window too wide. Narrow variant (lr_mul<0.1) still viable.
 
 ---
 

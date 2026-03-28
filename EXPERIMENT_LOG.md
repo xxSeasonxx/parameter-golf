@@ -49,6 +49,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 034 | exp_034_gradclip025 | MLP3x + GRAD_CLIP=0.25 | 690/2000 | 1.6362 | 13.0MB | Discard | Too aggressive: +0.003 vs clip=0.5. Clips useful gradients |
 | 035 | exp_035_adaptive_ns_med | Adaptive NS scheduling (5→7 warmdown) | 695/2000 | 1.6352 | 13.0MB | Discard | Neutral: +0.0018 vs best. NS converges fine at 5 iters for dim=512 |
 | 036 | exp_036_qat_warmdown | Warmdown-phase QAT (int8 noise ramp) | 709/2000 | 1.6907 | 12.8MB | Discard | +0.057 BPB regression. QAT noise fights warmdown convergence. Quant gap 0.0002 (excellent) |
+| 037 | exp_037_swa | SWA (uniform avg 60 snapshots, lr_mul<0.5) | 706/2000 | 1.7601 | 12.6MB | Discard | +0.127 BPB regression. Wide SWA window catastrophic. Pre-SWA was 1.6288 |
 
 ---
 
@@ -357,6 +358,30 @@ if self.args.muon_weight_decay > 0:
 - The quant gap closure (0.0002 BPB) validates that QAT works mechanistically. But it needs to happen BEFORE warmdown, not during it.
 - Better compression (12.8MB vs 13.0MB) suggests QAT does push weights toward more quantization-friendly values.
 - A gentler variant (constant low QAT strength, or QAT applied only before warmdown begins) might work, especially on 8xH100 with more steps and a proper pre-warmdown phase.
+
+---
+
+### Experiment 037: SWA — Stochastic Weight Averaging (Discard)
+
+**Hypothesis**: Average discrete weight snapshots collected during warmdown when lr_mul < 0.5 (last ~60% of training steps). Unlike EMA blending (exp_018) which interpolated toward stale averages during training, SWA collects snapshots and averages them after training finishes. This is the standard approach used in competition entries.
+
+**Implementation**: Collect a snapshot every 10 steps when lr_mul < 0.5. After training, uniformly average all collected snapshots and replace the model weights.
+
+**What happened**:
+- Pre-SWA val_bpb=**1.6288** — actually better than current best (1.6334)! Pure random variance.
+- After SWA averaging 60 snapshots (collected from ~step 350 to 706): val_bpb=**1.7601 (int8)** — catastrophic **+0.131 BPB regression** from the pre-SWA model.
+- 706 steps at 851ms/step. Artifact: 12.6MB (better compression than best's 13.0MB — SWA smooths weights).
+
+**Root cause**: The averaging window was far too wide. lr_mul < 0.5 covers the last ~60% of training steps (steps ~350-706). Weights at step 350 and step 706 are very different — the model is still making meaningful progress between them. Uniformly averaging across such a wide window creates a "blurry" parameter average that is worse than any individual snapshot.
+
+**Competition comparison**: Top competition entries use SWA over the **last 100-120 steps only** (lr_mul < 0.1), or use EMA with very high decay (0.9999). Our window of 350 steps (lr_mul < 0.5) was 3-5x too wide.
+
+**Learnings**:
+- SWA with wide window (lr_mul < 0.5, ~60% of steps) is catastrophic: +0.131 BPB.
+- The pre-SWA model at 1.6288 demonstrates that run-to-run variance is ~0.005 BPB — our best (1.6334) is within noise.
+- Better compression (12.6MB vs 13.0MB) confirms that weight averaging smooths the parameter landscape and improves compressibility.
+- Must try: SWA_START_LR_MUL=0.1 (last ~70 steps only) or exponential weighting favoring later snapshots.
+- This failure is analogous to EMA (exp_018) in that both average over too much training history. The key is narrowness: only average weights that are already very close to the final solution.
 
 ---
 

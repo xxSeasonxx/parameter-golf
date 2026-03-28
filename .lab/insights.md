@@ -5,11 +5,11 @@ Validated learnings from experiments. Single source of truth. Delete disproven h
 ## Current Best
 
 ```
-commit: 5dffd6e
+commit: 996244b
 val_bpb: 1.6334 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, TRAIN_BATCH_TOKENS=24576)
 artifact: 13,023,930 bytes (~13.0MB, 3.0MB headroom)
 log: logs/exp_033_gradclip05.txt
-next_exp: 037
+next_exp: 038
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -58,6 +58,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.
 - **Warmdown QAT (ramping strength) is too aggressive**: exp_036 val_bpb=1.6907 (+0.057). QAT noise fights warmdown convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB suffers badly. Don't inject quant noise during the convergence-critical warmdown phase. A pre-warmdown QAT phase or constant low-strength QAT might work on H100 with more steps.
+- **SWA with wide window is catastrophic**: exp_037 val_bpb=1.7601 (+0.127). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) destroys convergence. Pre-SWA model was 1.6288 (within noise of best). Competition uses narrow SWA (last 100-120 steps, lr_mul<0.1) or high-decay EMA (0.9999). Better compression though (12.6MB vs 13.0MB).
 
 ## Evaluation
 
@@ -79,10 +80,11 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
 2. Frequency-decomposed skip gating — proven, unique
 3. ~~Warmdown-phase QAT~~ — FAILED (exp_036, +0.057 BPB). Ramping QAT during warmdown kills convergence. Quant gap closes (0.0002) but BPB too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
+5. ~~SWA wide window~~ — FAILED (exp_037, +0.127 BPB). lr_mul<0.5 too wide. Narrow variant (lr_mul<0.1) still promising.
 4. Layer-wise quantization budget allocation (NEW, to test) — data-driven per-layer precision
 
 **Known techniques to add** (table stakes):
-- SWA (average final checkpoints, NOT EMA blending which failed)
+- SWA with **narrow window** (last 100-120 steps only, lr_mul<0.1). Wide window FAILED (exp_037).
 - Int6 quantization (MLP/attention weights)
 - TTT LoRA at eval time (already in codebase)
 - Zstd-22 compression (replace zlib)
