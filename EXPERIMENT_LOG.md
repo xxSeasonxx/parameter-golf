@@ -56,6 +56,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | **041** | **exp_041_asymmlp** | **Asymmetric MLP (encoder=2x, decoder=4x)** | **708/2000** | **1.6311** | **13.1MB** | **BEST** | **-0.001 BPB. Same params as uniform MLP3x but better allocation** |
 | 042 | exp_042_asym15 | Extreme asymmetric MLP (1,5) | 708/2000 | 1.6321 | 12.7MB | Discard | +0.001 vs best. Encoder MLP=1x too aggressive, starves feature extraction |
 | 043 | exp_043_layerlr10 | LAYER_LR_SCALE=1.0 (deepest=2x LR) | 706/2000 | 1.6316 | 13.1MB | Discard | +0.0005 vs best. Scale saturates between 0.5-1.0. 0.5 sufficient |
+| 044 | exp_044_fsw16 | FREQ_SKIP_WINDOW=16 (smaller window) | 701/2000 | 1.6318 | 13.1MB | Discard | +0.0007 vs best. Window size doesn't matter. W=32 is fine |
 
 ---
 
@@ -545,6 +546,20 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Added `loss_per_token()` method on GPT model (returns per-position losses)
 - Added `eval_val_sliding()` function with batched overlapping-window processing
 - Compiled and warmed up separately from the training loss function
+
+---
+
+### Experiment 044: Frequency Skip Window Size (FREQ_SKIP_WINDOW=16)
+
+**Hypothesis**: Smaller frequency decomposition window (W=16 vs default W=32) gives finer frequency resolution, potentially capturing more granular frequency bands in skip connections.
+
+**Config**: Pure env-var change: `FREQ_SKIP_WINDOW=16`. All else identical to exp_041 best config.
+
+**Result**: val_bpb=1.6318 (int8), +0.0007 vs best (1.6311). Within noise. DISCARD.
+
+**Analysis**: The frequency decomposition in skip gating is robust to window size. W=16 (finer resolution, more frequency bands) performs identically to W=32 (coarser, fewer bands). This makes sense: the key insight of freq skip gating is the low/high frequency *decomposition itself*, not the exact cutoff. The per-dim gating weights learn to compensate for whatever window size is used. Not worth tuning further.
+
+**Key learning**: FREQ_SKIP_WINDOW is not a lever. W=32 default is fine.
 
 ---
 
