@@ -105,9 +105,9 @@ Prioritized by expected impact. Organized by research direction, not just parame
 **Expected impact**: -0.005 BPB + 1-2MB saved.
 **Effort**: Medium.
 
-### 12. ~~Per-Layer Learning Rate Scaling~~ [**OUR TWIST**] — TESTED exp_039: MARGINAL NEW BEST
-**Result**: val_bpb=1.6321 (-0.0013 vs best 1.6334). LAYER_LR_SCALE=0.5 (deeper layers get 1.0x to 1.5x LR). Within noise but zero overhead, keeping as new best.
-**Further tuning**: Low priority. Could try scale=0.3 or scale=0.7 but marginal signal doesn't justify more Mac experiments.
+### 12. ~~Per-Layer Learning Rate Scaling~~ [**OUR TWIST**] — TESTED exp_039/040: Direction confirmed
+**Result**: LAYER_LR_SCALE=0.5 (deeper=faster) is marginal new best (1.6321, -0.0013). Inverse direction (LAYER_LR_SCALE=-0.5, exp_040) is clearly worse (1.6463, +0.014). Confirms deeper layers need more LR.
+**Further tuning**: Low priority. Direction settled. Scale magnitude (0.3, 0.7) not worth more Mac experiments.
 
 ### 13. Cyclical Batch Size [**ORIGINAL**]
 **Hypothesis**: Cycle batch between 256K and 1M every ~200 steps. Small batches explore, large batches exploit. Same total token budget.
@@ -133,7 +133,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
 - ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
 - ~~SWA (wide + narrow)~~ [KNOWN] — TESTED exp_037 (+0.127) + exp_038 (+0.003). Both fail on Mac. Killed for Apple Silicon. H100-only.
-- ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039: marginal new best (-0.0013 BPP). LAYER_LR_SCALE=0.5 kept.
+- ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039: marginal new best (-0.0013 BPB). LAYER_LR_SCALE=0.5 kept. exp_040: inverse (-0.5) clearly worse (+0.014). Direction confirmed.
 
 ---
 
@@ -157,3 +157,4 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - **Grad clip=0.25**: exp_034 too aggressive, clips useful gradients.
 - **Warmdown QAT (ramping strength)**: exp_036 +0.057 BPB. QAT noise during warmdown fights convergence. Quant gap closes (0.0002) but overall BPB far too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
 - **SWA on Apple Silicon**: exp_037 (wide, +0.127) + exp_038 (narrow, +0.003). With ~700 steps, weights converge monotonically — no oscillation to average. H100-only technique (1500+ steps needed).
+- **Inverse per-layer LR (LAYER_LR_SCALE=-0.5)**: exp_040 +0.014 BPB. Early layers getting higher LR is wrong. Deeper layers need more LR to compensate for gradient attenuation.

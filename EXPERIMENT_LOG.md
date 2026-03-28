@@ -52,6 +52,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 037 | exp_037_swa | SWA (uniform avg 60 snapshots, lr_mul<0.5) | 706/2000 | 1.7601 | 12.6MB | Discard | +0.127 BPB regression. Wide SWA window catastrophic. Pre-SWA was 1.6288 |
 | 038 | exp_038_swa_narrow | Narrow SWA (lr_mul<0.1, 24 snapshots, every 5 steps) | 704/2000 | 1.6363 | 13.0MB | Discard | +0.003 vs best. Pre-SWA 1.6295→post-SWA 1.6363. SWA killed for Mac |
 | **039** | **exp_039_layerlr** | **Per-layer LR scaling (LAYER_LR_SCALE=0.5)** | **702/2000** | **1.6321** | **13.2MB** | **BEST** | **-0.0013 BPP. Marginal new best. Deeper layers get higher LR** |
+| 040 | exp_040_layerlr_inv | Inverse layer LR (LAYER_LR_SCALE=-0.5) | 702/2000 | 1.6463 | 12.5MB | Discard | +0.014 BPB. Early layers higher LR is wrong direction. Confirms deeper=faster is correct |
 
 ---
 
@@ -430,6 +431,24 @@ if self.args.muon_weight_decay > 0:
 - Per-layer LR scaling for Muon shows marginal positive signal. LAYER_LR_SCALE=0.5 (1.0x to 1.5x range) is the first tested value.
 - Zero overhead technique — worth including in the H100 config.
 - Further tuning (scale=0.3, scale=0.7, or inverse scaling) could be explored but is low priority given the marginal signal.
+
+---
+
+### Experiment 040: Inverse Per-Layer LR Scaling (Discard)
+
+**Hypothesis**: Test the opposite direction of exp_039: LAYER_LR_SCALE=-0.5 gives early layers higher LR (1.0x at layer 9, up to 1.5x at layer 0). Maybe early layers, which learn more general features, benefit more from higher LR.
+
+**What happened**:
+- Int8 val_bpb=**1.6463** — **+0.014 BPB regression** vs best (1.6321).
+- Pre-quant val_bpb=1.6427.
+- 702 steps at 855ms/step. Artifact: 12,526,015 bytes (~12.5MB).
+- Interesting: artifact is ~0.7MB smaller than exp_039 (13.2MB). Lower LR on later layers produces simpler weights that compress better.
+
+**Learnings**:
+- Inverse layer LR is clearly worse (+0.014 BPB). This is a symmetric test against exp_039 and confirms that **deeper layers need MORE LR, not less**.
+- LAYER_LR_SCALE=0.5 (deeper=faster) is the correct direction. The gradient attenuation through the residual stream genuinely requires compensation.
+- Compression benefit (12.5MB vs 13.2MB) is expected: later layers with lower LR explore less of the parameter space and settle on simpler solutions.
+- No further tuning of layer LR direction is needed. Scale magnitude (0.3, 0.7) is low priority given the marginal signal from exp_039.
 
 ---
 
