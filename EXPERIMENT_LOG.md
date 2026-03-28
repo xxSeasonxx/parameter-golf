@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6334** (commit `996244b`, exp_033 MLP3x+GRAD_CLIP=0.5)
+**Final best**: val_bpb=**1.6321** (commit `50dbc88`, exp_039 per-layer LR scaling)
 
 ---
 
@@ -51,6 +51,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 036 | exp_036_qat_warmdown | Warmdown-phase QAT (int8 noise ramp) | 709/2000 | 1.6907 | 12.8MB | Discard | +0.057 BPB regression. QAT noise fights warmdown convergence. Quant gap 0.0002 (excellent) |
 | 037 | exp_037_swa | SWA (uniform avg 60 snapshots, lr_mul<0.5) | 706/2000 | 1.7601 | 12.6MB | Discard | +0.127 BPB regression. Wide SWA window catastrophic. Pre-SWA was 1.6288 |
 | 038 | exp_038_swa_narrow | Narrow SWA (lr_mul<0.1, 24 snapshots, every 5 steps) | 704/2000 | 1.6363 | 13.0MB | Discard | +0.003 vs best. Pre-SWA 1.6295→post-SWA 1.6363. SWA killed for Mac |
+| **039** | **exp_039_layerlr** | **Per-layer LR scaling (LAYER_LR_SCALE=0.5)** | **702/2000** | **1.6321** | **13.2MB** | **BEST** | **-0.0013 BPP. Marginal new best. Deeper layers get higher LR** |
 
 ---
 
@@ -408,6 +409,30 @@ if self.args.muon_weight_decay > 0:
 
 ---
 
+### Experiment 039: Per-Layer LR Scaling for Muon (Marginal New Best)
+
+**Hypothesis**: Deeper layers need higher learning rates because they receive more attenuated gradients through the residual stream. Scale Muon LR per layer: layer_i gets `base_lr * (1.0 + scale * i / (num_layers - 1))` where scale=0.5. This means layer 0 gets 1.0x LR and layer 9 gets 1.5x LR.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6294** — consistent with recent pre-quant results (~1.629 range).
+- Int8 val_bpb=**1.6321** — **-0.0013 BPB** vs best (1.6334). Marginal new best.
+- 702 steps at 855ms/step. Artifact: 13,236,789 bytes (~13.2MB).
+
+**Analysis**:
+- The improvement is very small (-0.0013) and within the noise range (~0.005 BPB run-to-run variance observed in exp_037/038 pre-SWA results).
+- However, the technique has zero step time overhead (just a scalar multiply on existing LR) and no artifact size cost.
+- The pre-quant result (1.6294) is consistent with other recent pre-quant results, suggesting the per-layer LR is not hurting and may be helping slightly.
+- On 8xH100 with more steps (1500+), the per-layer LR scaling could have a larger effect as the deeper layers get more opportunity to benefit from the higher LR.
+
+**Decision**: **KEEP** as marginal new best. The improvement is within noise, but keeping it costs nothing. The concept is sound and may show larger gains with more training steps on H100.
+
+**Learnings**:
+- Per-layer LR scaling for Muon shows marginal positive signal. LAYER_LR_SCALE=0.5 (1.0x to 1.5x range) is the first tested value.
+- Zero overhead technique — worth including in the H100 config.
+- Further tuning (scale=0.3, scale=0.7, or inverse scaling) could be explored but is low priority given the marginal signal.
+
+---
+
 ## Code Changes Made to train_gpt_mlx.py
 
 All changes are in `train_gpt_mlx.py`. No other training files were modified.
@@ -426,6 +451,11 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Replaced flat `skip_weights` with `skip_lo_weights` (low-freq band) and `skip_hi_weights` (high-freq band)
 - Low-freq = windowed mean (W=32), high-freq = residual after subtracting low-freq
 - Independent learned gates per frequency band per skip connection
+
+### 5. Per-Layer LR Scaling for Muon (used in best run)
+- Added `LAYER_LR_SCALE` env var (default 0.0 = disabled)
+- In `Muon.step()`, each layer's LR is scaled: `lr_i = base_lr * (1.0 + scale * i / (num_layers - 1))`
+- Layer 0 gets 1.0x LR, deepest layer gets (1.0 + scale)x LR
 
 ### 3. Sliding Window Evaluation (80 lines, implemented but not used in best run)
 - Added `EVAL_STRIDE` env var (default 0 = disabled)

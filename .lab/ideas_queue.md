@@ -105,10 +105,9 @@ Prioritized by expected impact. Organized by research direction, not just parame
 **Expected impact**: -0.005 BPB + 1-2MB saved.
 **Effort**: Medium.
 
-### 12. Per-Layer Learning Rate Decay [**OUR TWIST**]
-**Hypothesis**: `lr_layer_i = base_lr * decay^(num_layers - i)`. Later layers get higher LR. Used in fine-tuning but never with Muon.
-**Expected impact**: -0.003 to -0.005 BPB.
-**Effort**: Low.
+### 12. ~~Per-Layer Learning Rate Scaling~~ [**OUR TWIST**] — TESTED exp_039: MARGINAL NEW BEST
+**Result**: val_bpb=1.6321 (-0.0013 vs best 1.6334). LAYER_LR_SCALE=0.5 (deeper layers get 1.0x to 1.5x LR). Within noise but zero overhead, keeping as new best.
+**Further tuning**: Low priority. Could try scale=0.3 or scale=0.7 but marginal signal doesn't justify more Mac experiments.
 
 ### 13. Cyclical Batch Size [**ORIGINAL**]
 **Hypothesis**: Cycle batch between 256K and 1M every ~200 steps. Small batches explore, large batches exploit. Same total token budget.
@@ -134,6 +133,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
 - ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
 - ~~SWA (wide + narrow)~~ [KNOWN] — TESTED exp_037 (+0.127) + exp_038 (+0.003). Both fail on Mac. Killed for Apple Silicon. H100-only.
+- ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039: marginal new best (-0.0013 BPP). LAYER_LR_SCALE=0.5 kept.
 
 ---
 

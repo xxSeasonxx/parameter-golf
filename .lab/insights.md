@@ -5,16 +5,16 @@ Validated learnings from experiments. Single source of truth. Delete disproven h
 ## Current Best
 
 ```
-commit: 996244b
-val_bpb: 1.6334 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, TRAIN_BATCH_TOKENS=24576)
-artifact: 13,023,930 bytes (~13.0MB, 3.0MB headroom)
-log: logs/exp_033_gradclip05.txt
-next_exp: 039
+commit: 50dbc88
+val_bpb: 1.6321 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5)
+artifact: 13,236,789 bytes (~13.2MB, 2.8MB headroom)
+log: logs/exp_039_layerlr.txt
+next_exp: 040
 ```
 
 **Best config env vars** (copy-paste for runs):
 ```
-NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT=3 GRAD_CLIP_NORM=0.5
+NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT=3 GRAD_CLIP_NORM=0.5 LAYER_LR_SCALE=0.5
 ```
 Note: Warmdown-aware WD scheduling is in the code: `wd = base_wd * (2 - lr_mul)`
 Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 default)
@@ -60,6 +60,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Warmdown QAT (ramping strength) is too aggressive**: exp_036 val_bpb=1.6907 (+0.057). QAT noise fights warmdown convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB suffers badly. Don't inject quant noise during the convergence-critical warmdown phase. A pre-warmdown QAT phase or constant low-strength QAT might work on H100 with more steps.
 - **SWA with wide window is catastrophic**: exp_037 val_bpb=1.7601 (+0.127). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) destroys convergence. Pre-SWA model was 1.6288 (within noise of best). Competition uses narrow SWA (last 100-120 steps, lr_mul<0.1) or high-decay EMA (0.9999). Better compression though (12.6MB vs 13.0MB).
 - **SWA with narrow window still hurts on Mac**: exp_038 val_bpb=1.6363 (+0.003). 24 snapshots, lr_mul<0.1, every 5 steps. Pre-SWA was 1.6295, post-SWA 1.6363 (+0.007). Much better than wide SWA but still a regression. With only ~700 steps, weights monotonically converge during warmdown — no oscillation to average out. **SWA is KILLED for Apple Silicon experiments.** May still help on 8xH100 with 1500+ steps.
+- **Per-layer LR scaling is marginally positive**: exp_039 LAYER_LR_SCALE=0.5 gives val_bpb=1.6321 (-0.0013 vs best). Deeper layers get higher LR (1.0x to 1.5x range). Within noise but zero overhead, so keeping it. May show larger gains on H100 with more steps.
 
 ## Evaluation
 
@@ -68,7 +69,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 ## Porting to 8xH100
 
 Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval.
-Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT=3, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5.
+Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT=3, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5.
 Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 
 ## Competition Strategy (8xH100 target: ≤1.12 BPB)
