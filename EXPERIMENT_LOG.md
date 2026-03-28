@@ -47,6 +47,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | **032** | **exp_032_gradclip** | **MLP3x + GRAD_CLIP=1.0** | **702/2000** | **1.6434** | **13.0MB** | **Superseded** | **-0.006 BPB. Stabilizes early training spikes** |
 | **033** | **exp_033_gradclip05** | **MLP3x + GRAD_CLIP=0.5** | **698/2000** | **1.6334** | **13.0MB** | **BEST** | **-0.016 BPB total. Stronger clip is better** |
 | 034 | exp_034_gradclip025 | MLP3x + GRAD_CLIP=0.25 | 690/2000 | 1.6362 | 13.0MB | Discard | Too aggressive: +0.003 vs clip=0.5. Clips useful gradients |
+| 035 | exp_035_adaptive_ns_med | Adaptive NS scheduling (5→7 warmdown) | 695/2000 | 1.6352 | 13.0MB | Discard | Neutral: +0.0018 vs best. NS converges fine at 5 iters for dim=512 |
 
 ---
 
@@ -320,6 +321,21 @@ if self.args.muon_weight_decay > 0:
 - **The clip curve**: no_clip→1.6492, clip=1.0→1.6434, clip=0.5→1.6334. Monotonically improving with tighter clipping (so far).
 - **Zero overhead**: clipping is a simple norm comparison + scaling.
 - **Synergy with Muon**: Muon's Newton-Schulz orthogonalization may amplify gradient noise. Clipping before Muon processing keeps the orthogonalization well-conditioned.
+
+---
+
+### Experiment 035: Adaptive Newton-Schulz Scheduling (Discard)
+
+**Hypothesis**: Schedule NS iterations from 5 (during full LR) to 7 (during warmdown) for more precise gradient conditioning when fine convergence matters most.
+
+**Code change**: 1 line in `Muon.step()`: `ns_steps = base_steps + round(2 * (1 - lr_mul))` when in warmdown.
+
+**What happened**: val_bpb=1.6352 (int8) -- +0.0018 worse than best (1.6334). Pre-quant val_bpb=1.6321 was marginally better, but the quantization gap erased the gain. 695 steps at 863ms/step. Artifact: 13.0MB.
+
+**Learnings**:
+- Newton-Schulz already converges well at 5 iterations for dim=512. The error from 5 vs 7 iterations is negligible compared to gradient noise.
+- The pre-quant result (1.6321 vs best's ~1.630) hints at a tiny real effect, but it is masked by quantization noise and not worth the complexity.
+- Don't schedule NS iterations -- 5 is sufficient for this model size.
 
 ---
 

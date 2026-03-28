@@ -540,9 +540,7 @@ class Muon:
             buf = momentum * self.buffers[k] + g
             self.buffers[k] = buf
             g_eff = g + momentum * buf
-            # Adaptive NS: more iterations during warmdown for precise gradient conditioning
-            ns_steps = self.args.muon_backend_steps + (0 if lr_mul >= 1.0 else round(2 * (1.0 - lr_mul)))
-            g_ortho = zeropower_newtonschulz5(g_eff, ns_steps)
+            g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
             scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
             update = (g_ortho * scale).astype(p.dtype)
             if wd > 0:

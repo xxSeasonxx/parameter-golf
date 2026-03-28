@@ -9,7 +9,7 @@ commit: 5dffd6e
 val_bpb: 1.6334 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, TRAIN_BATCH_TOKENS=24576)
 artifact: 13,023,930 bytes (~13.0MB, 3.0MB headroom)
 log: logs/exp_033_gradclip05.txt
-next_exp: 035
+next_exp: 036
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -53,6 +53,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Hyperparameter sweeps at batch=8192 are NOT representative**: RoPE and QK gain tuning showed no gains. Focus on batch scaling and architectural ideas.
 - **DropHead hurts**: p=0.1 (+0.008 BPB) and p=0.05 (+0.006 BPB). Stochastic head masking adds gradient noise that isn't compensated by regularization benefit when WD is already strong.
 - **Gradient clipping is a major lever**: clip=0.5 is optimal. Response: no_clip→1.6492, clip=1.0→1.6434, clip=0.5→1.6334, clip=0.25→1.6362. Clip=0.25 too aggressive (clips useful gradients). Clip=0.5 is the sweet spot.
+- **Adaptive Newton-Schulz scheduling (5→7 during warmdown) is neutral**: exp_035 val_bpb=1.6352 (+0.0018). NS converges well enough at 5 steps for dim=512. Don't schedule NS iterations.
 - **Batch=16k with MLP3x is too small**: val_bpb=1.6692 despite 937 steps. Gradient quality dominates.
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.
@@ -77,8 +78,7 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
 2. Frequency-decomposed skip gating — proven, unique
 3. Warmdown-phase QAT (NEW, to test) — integrate quant noise into warmdown schedule
-4. Adaptive Newton-Schulz scheduling (NEW, to test) — schedule NS iterations 3→5→7
-5. Layer-wise quantization budget allocation (NEW, to test) — data-driven per-layer precision
+4. Layer-wise quantization budget allocation (NEW, to test) — data-driven per-layer precision
 
 **Known techniques to add** (table stakes):
 - SWA (average final checkpoints, NOT EMA blending which failed)
@@ -87,6 +87,5 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 - Zstd-22 compression (replace zlib)
 
 **Priority order for Mac testing** (validate mechanisms before H100):
-1. Adaptive NS scheduling (3 lines, immediate test)
-2. Warmdown QAT mechanism (int8 on Mac, int6 on H100)
-3. Depth-recurrent warmdown (high risk, start gentle)
+1. Warmdown QAT mechanism (int8 on Mac, int6 on H100)
+2. Depth-recurrent warmdown (high risk, start gentle)

@@ -26,7 +26,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 |-------|-----------|-------------|--------|
 | Foundation | 11L, batch=524K, SWA, int6, TTT, sliding eval | ~1.14-1.15 | To port |
 | Proven Originals | Warmdown-aware WD, freq skip gating | ~1.13-1.14 | Done |
-| New Originals | Warmdown QAT, adaptive NS, layer-wise quant | ~1.11-1.12 | To test |
+| New Originals | Warmdown QAT, layer-wise quant | ~1.11-1.12 | To test |
 
 ---
 
@@ -49,14 +49,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 **Effort**: Medium. ~30 lines: int6 quant/dequant functions + injection in warmdown.
 **Test on Mac**: Yes — can validate the mechanism at int8 scale first.
 
-### 2. Adaptive Newton-Schulz Scheduling [**ORIGINAL**]
-**Hypothesis**: Muon's Newton-Schulz always runs 5 iterations. Schedule based on training phase: 3 steps early (don't over-orthogonalize noise), 5 mid-training (standard), 7 during warmdown (precise conditioning for fine convergence).
-**Why original**: Everyone uses fixed NS steps. Scheduling them is unexplored.
-**Expected impact**: -0.005 to -0.01 BPB.
-**Effort**: Very low. 3 lines of code.
-**Test on Mac**: Yes — trivial to test.
-
-### 3. Layer-Wise Quantization Budget Allocation [**ORIGINAL**]
+### 2. Layer-Wise Quantization Budget Allocation [**ORIGINAL**]
 **Hypothesis**: Instead of uniform int6 everywhere, measure quantization sensitivity per layer (how much val_loss degrades when only that layer is quantized). Give sensitive layers int8, insensitive layers int5/int4. Maximize effective capacity in 16MB.
 **Why original**: Mixed-precision approaches exist but decide by architecture position. Ours is empirically data-driven — we measure and allocate.
 **Expected impact**: -0.01 to -0.02 BPB via more effective parameter use.
@@ -141,6 +134,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~MLP_MULT=3~~ [KNOWN] — DONE: -0.003 BPB. Free capacity win.
 - ~~Gradient clipping=0.5~~ [SWEEP] — DONE: -0.016 BPB. Sweet spot (clip=0.25 too aggressive).
 - ~~Batch scaling~~ [SWEEP] — DONE: batch=24576 optimal on Mac. Marginal returns above this.
+- ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
 
 ---
 
