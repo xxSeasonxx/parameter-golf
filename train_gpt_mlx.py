@@ -102,6 +102,12 @@ class Hyperparameters:
     muon_weight_decay: float = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
+    # Warmdown-phase QAT: inject quantization noise during warmdown to teach the model
+    # to tolerate int8 rounding. Applied every qat_every steps when lr_mul < 1.0.
+    # qat_strength controls the blend: w = (1-s)*w + s*dequant(quant(w)), ramping with warmdown.
+    qat_warmdown: bool = bool(int(os.environ.get("QAT_WARMDOWN", "0")))
+    qat_every: int = int(os.environ.get("QAT_EVERY", 5))
+
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
     # stride=64 matches the competition's best evaluation strategy.
@@ -195,6 +201,20 @@ def accumulate_flat_grads(
 
 def rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
     return (x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)).astype(x.dtype)
+
+
+def sim_quant_int8(w: mx.array) -> mx.array:
+    """Simulate int8 per-row quantization + dequantization in MLX (differentiable via STE)."""
+    w_f32 = w.astype(mx.float32)
+    if w_f32.ndim == 2:
+        abs_max = mx.max(mx.abs(w_f32), axis=1, keepdims=True)
+        scale = mx.maximum(abs_max / 127.0, mx.array(1.0 / 127.0))
+        q = mx.clip(mx.round(w_f32 / scale), -127, 127)
+        return (q * scale).astype(w.dtype)
+    abs_max = mx.max(mx.abs(w_f32))
+    scale = mx.maximum(abs_max / 127.0, mx.array(1.0 / 127.0))
+    q = mx.clip(mx.round(w_f32 / scale), -127, 127)
+    return (q * scale).astype(w.dtype)
 
 
 def zeropower_newtonschulz5(g: mx.array, steps: int, eps: float = 1e-7) -> mx.array:
@@ -1256,6 +1276,20 @@ def main() -> None:
         grads = clip_grad_tree(grads, args.grad_clip_norm)
         train_loss_value = float(train_loss.item())  # .item() triggers mx.eval() for this scalar
         opt.step(model, grads, step=step, lr_mul=lr_mul)
+
+        # Warmdown-phase QAT: periodically quantize+dequantize matrix weights during warmdown.
+        # Strength ramps with warmdown: at lr_mul=1.0, no QAT; at lr_mul=0, full replacement.
+        if args.qat_warmdown and lr_mul < 1.0 and step % args.qat_every == 0:
+            qat_strength = 1.0 - lr_mul  # ramp from 0 to 1 as warmdown progresses
+            params = dict(tree_flatten(model.parameters()))
+            updated = {}
+            for k, p in params.items():
+                if p.ndim == 2 and k.startswith("blocks.") and not any(pat in k for pat in CONTROL_TENSOR_NAME_PATTERNS):
+                    q_p = sim_quant_int8(p)
+                    updated[k] = ((1.0 - qat_strength) * p + qat_strength * q_p).astype(p.dtype)
+            if updated:
+                model.update(tree_unflatten(list(updated.items())))
+
         # mx.synchronize() is the timing fence — everything above is lazy/async. This blocks
         # until all Metal GPU work finishes, giving accurate wall-clock step timing.
         mx.synchronize()
