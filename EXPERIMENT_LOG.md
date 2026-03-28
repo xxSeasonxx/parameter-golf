@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6518** (commit `c8c2028`, exp_024 batch=24576)
+**Final best**: val_bpb=**1.6334** (commit `996244b`, exp_033 MLP3x+GRAD_CLIP=0.5)
 
 ---
 
@@ -36,7 +36,16 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 021 | exp_021_qkgain1 | QK_GAIN_INIT=1.0 | 1713/2000 | 1.7542 | 9.8MB | Discard | +0.014 BPB regression. Default 1.5 is better |
 | **022** | **exp_022_batch16k** | **TRAIN_BATCH_TOKENS=16384** | **1057/2000** | **1.6584** | **11.2MB** | **Superseded** | **-0.082 BPB! 2x data/step, better gradient quality dominates** |
 | 023 | exp_023_batch16k_wd600 | batch=16k + warmdown=600 | 1038/2000 | 1.6877 | 11.5MB | Discard | Shorter warmdown hurts again: +0.029 BPB vs warmdown=1200 |
-| **024** | **exp_024_batch24k** | **TRAIN_BATCH_TOKENS=24576** | **711/2000** | **1.6518** | **10.8MB** | **BEST** | **-0.007 more BPB. Batch scaling trend continues** |
+| **024** | **exp_024_batch24k** | **TRAIN_BATCH_TOKENS=24576** | **711/2000** | **1.6518** | **10.8MB** | **Superseded** | **-0.007 more BPB. Batch scaling trend continues** |
+| 025 | exp_025_drophead | DropHead p=0.10 | 788/2000 | 1.6598 | 10.7MB | Discard | +0.008 BPB regression. Gradient noise hurts with WD already strong |
+| 026 | exp_026_drophead05 | DropHead p=0.05 | 772/2000 | 1.6582 | 10.8MB | Discard | +0.006 BPB. Gentler still hurts |
+| **027** | **exp_027_mlp3x** | **MLP_MULT=3** | **705/2000** | **1.6492** | **12.9MB** | **Superseded** | **-0.003 BPB. 24M params, near-zero step time overhead** |
+| 028 | exp_028_mlp3x_batch32k | MLP3x + batch=32768 | 552/2000 | 1.6582 | 12.2MB | Discard | Too slow: 1087ms/step, only 552 steps |
+| 029 | exp_029_mlp3x_wd15 | MLP3x + WD=0.15 | 703/2000 | 1.6513 | 11.8MB | Discard | +0.002 over WD=0.10. Better compression but worse BPB |
+| 030 | exp_030_11L_mlp3x | 11L + MLP3x | 645/2000 | 1.6757 | 13.8MB | Discard | Too heavy: 931ms/step, only 645 steps |
+| 031 | exp_031_mlp3x_batch16k | MLP3x + batch=16384 | 937/2000 | 1.6692 | 13.3MB | Discard | Gradient quality too poor despite more steps |
+| **032** | **exp_032_gradclip** | **MLP3x + GRAD_CLIP=1.0** | **702/2000** | **1.6434** | **13.0MB** | **Superseded** | **-0.006 BPB. Stabilizes early training spikes** |
+| **033** | **exp_033_gradclip05** | **MLP3x + GRAD_CLIP=0.5** | **698/2000** | **1.6334** | **13.0MB** | **BEST** | **-0.016 BPB total. Stronger clip is better** |
 
 ---
 
@@ -261,6 +270,55 @@ if self.args.muon_weight_decay > 0:
 - **Token throughput matters more than step count.** At batch=24k, we see ~31K tok/s vs ~23K at batch=8k — 35% more data processed in the same wallclock.
 - **The batch scaling curve**: 8192→1.7403, 16384→1.6584, 24576→1.6518. The marginal return is diminishing (0.082 → 0.007), suggesting we're approaching the optimal batch for this wallclock budget.
 - **Artifact size is manageable**: 10.8MB at batch=24k, well under the 16MB limit.
+
+---
+
+### Experiments 025-026: DropHead (Discard)
+
+**Hypothesis**: Randomly zeroing entire attention heads during training (DropHead) forces head diversity. Regularization via WD has been our biggest lever.
+
+**What happened**:
+- exp_025 (p=0.10): val_bpb=1.6598 — +0.008 regression.
+- exp_026 (p=0.05): val_bpb=1.6582 — +0.006 regression.
+
+**Learnings**: DropHead adds gradient noise that isn't compensated by regularization when WD is already strong (0.10). Unlike WD which reduces weight magnitude, DropHead randomly corrupts information flow. With only 8 heads, even p=0.05 zeroes out ~2 heads per sample on average.
+
+---
+
+### Experiment 027: MLP_MULT=3 (NEW BEST)
+
+**Hypothesis**: Wider MLP (3x instead of 2x) adds capacity with minimal step time overhead on Apple Silicon.
+
+**What happened**: val_bpb=**1.6492** — beat exp_024 by 0.003 BPB. Params: 24.1M (vs 18.9M). Step time: ~852ms (vs ~845ms). Artifact: 12.9MB (3.1MB headroom).
+
+**Learnings**: MLP3x is nearly free on Apple Silicon — the MLP computation parallelizes well on unified memory. The 27% param increase only adds 1% step time.
+
+---
+
+### Experiments 028-031: MLP3x Scaling (All Discard)
+
+**exp_028 (MLP3x + batch=32k)**: 1.6582. Too slow at 1087ms/step, only 552 steps.
+**exp_029 (MLP3x + WD=0.15)**: 1.6513. Slightly over-regularized but great compression (11.8MB).
+**exp_030 (11L + MLP3x)**: 1.6757. Too heavy: 931ms/step, only 645 steps.
+**exp_031 (MLP3x + batch=16k)**: 1.6692. Gradient quality too poor despite 937 steps.
+
+**Learnings**: batch=24576 remains optimal with MLP3x. WD=0.10 remains the sweet spot. 11L+MLP3x is too heavy for Apple Silicon.
+
+---
+
+### Experiments 032-033: Gradient Clipping (MAJOR DISCOVERY)
+
+**Hypothesis**: Early training shows massive loss spikes (17.9 at step 2). Gradient clipping could prevent these wasted updates and stabilize learning.
+
+**What happened**:
+- exp_032 (clip=1.0): val_bpb=**1.6434** — -0.006 from no clip.
+- exp_033 (clip=0.5): val_bpb=**1.6334** — -0.016 from no clip! Stronger clipping is better.
+
+**Key Learnings**:
+- **Gradient clipping is a major discovery for this setup.** The early loss spikes waste optimization steps with huge, poorly-directed gradients.
+- **The clip curve**: no_clip→1.6492, clip=1.0→1.6434, clip=0.5→1.6334. Monotonically improving with tighter clipping (so far).
+- **Zero overhead**: clipping is a simple norm comparison + scaling.
+- **Synergy with Muon**: Muon's Newton-Schulz orthogonalization may amplify gradient noise. Clipping before Muon processing keeps the orthogonalization well-conditioned.
 
 ---
 

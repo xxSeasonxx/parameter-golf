@@ -83,7 +83,16 @@ Prioritized by expected impact. Organized by research direction, not just parame
 **Effort**: Low. ~10 lines in CausalSelfAttention.
 
 ### 8. ~~Larger Batch Tokens~~ [SWEEP]
-DONE: batch=16384 (-0.082 BPB!), batch=24576 (-0.007 more). batch=24k is now the default. Marginal returns diminishing — try batch=32768 as a final test.
+DONE: batch=16384 (-0.082 BPB!), batch=24576 (-0.007 more). batch=32768 worse (+0.009). batch=24k is the sweet spot.
+
+### NEW. ~~Gradient Clipping~~ [SWEEP]
+DONE: clip=1.0 (-0.006 BPB), clip=0.5 (-0.016 BPB). Major discovery! Testing clip=0.25 next.
+
+### NEW. ~~MLP_MULT=3~~ [KNOWN]
+DONE: -0.003 BPB. Near-zero step time overhead, 12.9MB artifact.
+
+### NEW. ~~DropHead~~ [KNOWN] — KILLED
+p=0.10 (+0.008), p=0.05 (+0.006). Gradient noise hurts when WD is already strong.
 
 ---
 
@@ -118,6 +127,11 @@ exp_019: Over-regularized +0.029 BPB. WD=0.10 is the sweet spot.
 - **ROPE_BASE=50000**: exp_020 +0.021 BPB regression. Default 10000 is already good.
 - **QK_GAIN_INIT=1.0**: exp_021 +0.014 BPB regression. Default 1.5 is well-calibrated.
 - **Shorter warmdown at large batch**: exp_023 warmdown=600 with batch=16k was +0.029 worse than warmdown=1200. Long warmdown is ALWAYS beneficial.
+- **DropHead (stochastic head masking)**: exp_025 (p=0.1, +0.008) and exp_026 (p=0.05, +0.006). Gradient noise hurts when WD is already strong.
+- **batch=32768 with MLP3x**: exp_028 (+0.009). Too slow (1087ms/step), only 552 steps.
+- **11L+MLP3x**: exp_030 (+0.027). Too heavy (931ms/step), only 645 steps.
+- **WD=0.15 with MLP3x**: exp_029 (+0.002). Still over-regularized.
+- **batch=16k with MLP3x**: exp_031 (+0.020). Gradient quality too poor.
 
 ---
 
