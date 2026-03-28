@@ -5,16 +5,16 @@ Validated learnings from experiments. Single source of truth. Delete disproven h
 ## Current Best
 
 ```
-commit: 50dbc88
-val_bpb: 1.6321 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5)
-artifact: 13,236,789 bytes (~13.2MB, 2.8MB headroom)
-log: logs/exp_039_layerlr.txt
-next_exp: 041
+commit: 3af0786
+val_bpb: 1.6311 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5)
+artifact: 13,075,651 bytes (~13.1MB, 2.9MB headroom)
+log: logs/exp_041_asymmlp.txt
+next_exp: 042
 ```
 
 **Best config env vars** (copy-paste for runs):
 ```
-NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT=3 GRAD_CLIP_NORM=0.5 LAYER_LR_SCALE=0.5
+NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT_ASYMMETRIC=2,4 GRAD_CLIP_NORM=0.5 LAYER_LR_SCALE=0.5
 ```
 Note: Warmdown-aware WD scheduling is in the code: `wd = base_wd * (2 - lr_mul)`
 Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 default)
@@ -25,6 +25,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **11 layers worse on Apple Silicon**: Better per-step (~0.04 BPB at matched steps) but slower (~394ms vs ~352ms), fewer total steps. **Try on 8xH100.**
 - **Frequency-decomposed skip gating [ORIGINAL]**: Decompose U-Net skip signals into low-freq (block means, W=32) and high-freq (residual) with independent per-dim gates. -0.010 BPB. Minimal overhead (~2ms/step).
 - **MLP_MULT=3 > MLP_MULT=2**: -0.003 BPP. 24.1M params vs 18.9M. Artifact 12.9MB (3.1MB headroom). Nearly identical step time (~852ms vs ~845ms). Free capacity win.
+- **Asymmetric MLP (2x encoder, 4x decoder) > uniform MLP3x**: -0.001 BPB. Same 24.1M params, slightly faster (848ms vs 855ms), slightly smaller artifact (13.1MB vs 13.2MB). Decoder layers need more MLP capacity for token prediction. Free architectural win.
 
 ## Optimization
 
@@ -70,7 +71,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 ## Porting to 8xH100
 
 Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval.
-Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT=3, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5.
+Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT_ASYMMETRIC=2,4, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5.
 Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 
 ## Competition Strategy (8xH100 target: ≤1.12 BPB)

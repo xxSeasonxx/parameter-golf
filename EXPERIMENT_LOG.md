@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6321** (commit `50dbc88`, exp_039 per-layer LR scaling)
+**Final best**: val_bpb=**1.6311** (commit `3af0786`, exp_041 asymmetric MLP width)
 
 ---
 
@@ -53,6 +53,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 038 | exp_038_swa_narrow | Narrow SWA (lr_mul<0.1, 24 snapshots, every 5 steps) | 704/2000 | 1.6363 | 13.0MB | Discard | +0.003 vs best. Pre-SWA 1.6295→post-SWA 1.6363. SWA killed for Mac |
 | **039** | **exp_039_layerlr** | **Per-layer LR scaling (LAYER_LR_SCALE=0.5)** | **702/2000** | **1.6321** | **13.2MB** | **BEST** | **-0.0013 BPP. Marginal new best. Deeper layers get higher LR** |
 | 040 | exp_040_layerlr_inv | Inverse layer LR (LAYER_LR_SCALE=-0.5) | 702/2000 | 1.6463 | 12.5MB | Discard | +0.014 BPB. Early layers higher LR is wrong direction. Confirms deeper=faster is correct |
+| **041** | **exp_041_asymmlp** | **Asymmetric MLP (encoder=2x, decoder=4x)** | **708/2000** | **1.6311** | **13.1MB** | **BEST** | **-0.001 BPB. Same params as uniform MLP3x but better allocation** |
 
 ---
 
@@ -452,6 +453,31 @@ if self.args.muon_weight_decay > 0:
 
 ---
 
+### Experiment 041: Asymmetric MLP Width (Marginal New Best)
+
+**Hypothesis**: Encoder layers (first half) get MLP_MULT=2, decoder layers (second half) get MLP_MULT=4. Same total params as uniform MLP_MULT=3 (24.1M). The reasoning: decoder layers closer to the output need more capacity for token prediction, while encoder layers can work with less since they primarily build representations.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6285** at step 708 — slightly better than recent pre-quant results (~1.629 range).
+- Int8 val_bpb=**1.6311** — **-0.001 BPB** vs best (1.6321). Marginal new best.
+- 708 steps at 848ms/step (slightly faster than uniform MLP3x at ~855ms). Artifact: 13,075,651 bytes (~13.1MB).
+- Same param count: 24,142,928 (identical to uniform MLP3x).
+
+**Analysis**:
+- The improvement (-0.001 BPB) is small but directionally consistent: reallocating MLP capacity from encoder to decoder layers is better than uniform distribution.
+- Slightly faster step time (848ms vs 855ms) may be due to the smaller encoder MLPs being cheaper to compute even though decoder MLPs are larger.
+- Artifact is slightly smaller (13.1MB vs 13.2MB), suggesting the asymmetric structure compresses marginally better.
+- The pre-quant result (1.6285) is better than exp_039's pre-quant (1.6294), and the int8 result (1.6311) is better than exp_039's (1.6321). Both metrics improved.
+
+**Decision**: **KEEP** as marginal new best. Same param budget, better allocation. Zero-cost architectural insight.
+
+**Learnings**:
+- Asymmetric MLP width is a free win: same params, slightly better BPB, slightly faster, slightly smaller artifact.
+- Decoder layers benefit from more MLP capacity. This aligns with the intuition that predicting next tokens requires more nonlinear transformation than building intermediate representations.
+- The MLP_MULT_ASYMMETRIC=2,4 pattern replaces uniform MLP_MULT=3 in best config.
+
+---
+
 ## Code Changes Made to train_gpt_mlx.py
 
 All changes are in `train_gpt_mlx.py`. No other training files were modified.
@@ -476,6 +502,11 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - In `Muon.step()`, each layer's LR is scaled: `lr_i = base_lr * (1.0 + scale * i / (num_layers - 1))`
 - Layer 0 gets 1.0x LR, deepest layer gets (1.0 + scale)x LR
 
+### 6. Asymmetric MLP Width (used in best run)
+- Added `MLP_MULT_ASYMMETRIC` env var (e.g., "2,4" for encoder=2x, decoder=4x)
+- Encoder layers (first half) get smaller MLP, decoder layers (second half) get larger MLP
+- Same total param count as uniform MLP_MULT=3
+
 ### 3. Sliding Window Evaluation (80 lines, implemented but not used in best run)
 - Added `EVAL_STRIDE` env var (default 0 = disabled)
 - Added `loss_per_token()` method on GPT model (returns per-position losses)
@@ -496,11 +527,13 @@ When porting the best config to `train_gpt.py` for competition submission:
 1. **Muon weight decay with warmdown scheduling**: PyTorch Muon has NO WD. Add WD + the `wd = base_wd * (2 - lr_mul)` schedule.
 2. **FP16 tok_emb**: Add `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS` logic to PyTorch quantization.
 3. **Sliding window eval**: Port `eval_val_sliding()` to PyTorch. Eval time is free on 8xH100.
+4. **Asymmetric MLP width**: Port `MLP_MULT_ASYMMETRIC` env var. Encoder layers get MLP2x, decoder layers get MLP4x.
 
 ### Just set env vars
-4. `NUM_LAYERS=10` (or try `NUM_LAYERS=11` — likely better on 8xH100 where step time is batch-dominated)
-5. `MUON_WEIGHT_DECAY=0.10`
-6. `WARMDOWN_ITERS=1200` — already the default
+5. `NUM_LAYERS=10` (or try `NUM_LAYERS=11` — likely better on 8xH100 where step time is batch-dominated)
+6. `MUON_WEIGHT_DECAY=0.10`
+7. `WARMDOWN_ITERS=1200` — already the default
+8. `MLP_MULT_ASYMMETRIC=2,4`
 
 ### Expected 8xH100 performance
 - Batch: 524,288 tokens/step (64x more than Apple Silicon's 8192)
