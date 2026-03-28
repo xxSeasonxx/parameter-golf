@@ -134,7 +134,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
 - ~~SWA (wide + narrow)~~ [KNOWN] — TESTED exp_037 (+0.127) + exp_038 (+0.003). Both fail on Mac. Killed for Apple Silicon. H100-only.
 - ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039: marginal new best (-0.0013 BPB). LAYER_LR_SCALE=0.5 kept. exp_040: inverse (-0.5) clearly worse (+0.014). Direction confirmed.
-- ~~Asymmetric MLP width~~ [**OUR TWIST**] — TESTED exp_041: marginal new best (-0.001 BPB). Encoder MLP2x, decoder MLP4x. Same params as uniform MLP3x but better capacity allocation. Kept.
+- ~~Asymmetric MLP width~~ [**OUR TWIST**] — TESTED exp_041: marginal new best (-0.001 BPB). Encoder MLP2x, decoder MLP4x. Same params as uniform MLP3x but better capacity allocation. Kept. exp_042: extreme (1,5) is worse (+0.001 BPB). 2,4 is the sweet spot.
 
 ---
 
@@ -159,3 +159,4 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - **Warmdown QAT (ramping strength)**: exp_036 +0.057 BPB. QAT noise during warmdown fights convergence. Quant gap closes (0.0002) but overall BPB far too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
 - **SWA on Apple Silicon**: exp_037 (wide, +0.127) + exp_038 (narrow, +0.003). With ~700 steps, weights converge monotonically — no oscillation to average. H100-only technique (1500+ steps needed).
 - **Inverse per-layer LR (LAYER_LR_SCALE=-0.5)**: exp_040 +0.014 BPB. Early layers getting higher LR is wrong. Deeper layers need more LR to compensate for gradient attenuation.
+- **Extreme asymmetric MLP (1,5)**: exp_042 +0.001 BPB vs (2,4). Encoder MLP=1x starves feature extraction. 2,4 is the sweet spot for U-Net skip architecture.

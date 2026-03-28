@@ -54,6 +54,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | **039** | **exp_039_layerlr** | **Per-layer LR scaling (LAYER_LR_SCALE=0.5)** | **702/2000** | **1.6321** | **13.2MB** | **BEST** | **-0.0013 BPP. Marginal new best. Deeper layers get higher LR** |
 | 040 | exp_040_layerlr_inv | Inverse layer LR (LAYER_LR_SCALE=-0.5) | 702/2000 | 1.6463 | 12.5MB | Discard | +0.014 BPB. Early layers higher LR is wrong direction. Confirms deeper=faster is correct |
 | **041** | **exp_041_asymmlp** | **Asymmetric MLP (encoder=2x, decoder=4x)** | **708/2000** | **1.6311** | **13.1MB** | **BEST** | **-0.001 BPB. Same params as uniform MLP3x but better allocation** |
+| 042 | exp_042_asym15 | Extreme asymmetric MLP (1,5) | 708/2000 | 1.6321 | 12.7MB | Discard | +0.001 vs best. Encoder MLP=1x too aggressive, starves feature extraction |
 
 ---
 
@@ -475,6 +476,22 @@ if self.args.muon_weight_decay > 0:
 - Asymmetric MLP width is a free win: same params, slightly better BPB, slightly faster, slightly smaller artifact.
 - Decoder layers benefit from more MLP capacity. This aligns with the intuition that predicting next tokens requires more nonlinear transformation than building intermediate representations.
 - The MLP_MULT_ASYMMETRIC=2,4 pattern replaces uniform MLP_MULT=3 in best config.
+
+---
+
+### Experiment 042: Extreme Asymmetric MLP (Discard)
+
+**Hypothesis**: Push all MLP capacity to decoder. MLP_MULT_ASYMMETRIC=1,5 instead of 2,4. If decoder benefits from more MLP, maximizing decoder allocation should help further.
+
+**What happened**: val_bpb=1.6321 (int8) -- +0.001 BPB worse than best (1.6311). 708 steps at 847ms/step. Artifact: 12.7MB (slightly better compression from tiny encoder MLPs). Pure env-var change, no code modifications.
+
+**Learnings**:
+- Extreme asymmetry (1,5) is NOT better than moderate (2,4). Encoder still needs meaningful MLP capacity.
+- MLP_MULT=1 in encoder layers is too aggressive -- it starves feature extraction in the first half of the network. The U-Net skip connections carry encoder representations to decoder layers; those representations need adequate nonlinear processing.
+- 2,4 is the sweet spot for this architecture: enough encoder capacity for good intermediate representations, extra decoder capacity for token prediction.
+- The slightly better compression (12.7MB vs 13.1MB) confirms that smaller encoder MLPs have less weight entropy, but the BPB cost is not worth it.
+
+**Decision**: **DISCARD**. Keep MLP_MULT_ASYMMETRIC=2,4.
 
 ---
 
