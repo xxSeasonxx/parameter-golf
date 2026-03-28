@@ -1,169 +1,129 @@
 # Ideas Queue
 
-Prioritized by expected impact. Organized by research direction, not just parameter sweeps.
+Prioritized by expected impact. Each idea is one experiment, one commit.
 
-**Originality key**: Each idea is tagged:
-- **ORIGINAL** — Novel technique we invented, not found in competition or literature
-- **OUR TWIST** — Known technique applied in a novel way specific to our setup
-- **KNOWN** — Established technique we haven't tried yet (porting, not inventing)
+**Originality key**:
+- **ORIGINAL** — Novel technique we invented
+- **OUR TWIST** — Known technique applied in a novel way
+- **KNOWN** — Established technique we haven't tried yet
 - **SWEEP** — Pure parameter/env-var exploration
 
-**Guiding principles** (updated for 8xH100 competition focus):
-1. **Weight entropy reduction is the master lever** — WD proved that reducing weight entropy improves BOTH BPB and compressibility simultaneously.
-2. **Late-phase training changes have outsized impact** — The warmdown phase determines final quality. Target ideas at the last 25% of training.
-3. **On 8xH100, step time is batch-dominated** — 11L, MLP3x, and other capacity increases are nearly free. Artifact size (16MB) is the binding constraint, not step time.
-4. **Maximize effective params in 16MB** — Int6, mixed precision, and compression advances directly translate to more model capacity within the artifact limit.
-5. **Eval-time compute is free** — TTT, sliding window, and other eval techniques cost nothing in the competition.
-6. **Originality matters** — We develop our own approaches. Use competition as inspiration, not a copying target.
+---
+
+## Next Session Plan: Local Validation for H100
+
+**Goal**: Validate 3 breakthrough techniques on Mac so they're ready for H100 deployment.
+**Approach**: Top-down — test each independently, learn, then combine.
+**Each experiment = one commit per program.md.**
+
+### Experiment 048: Zstd Compression [KNOWN]
+**What**: Replace `zlib.compress(data, 9)` with zstd level 22.
+**Code change**: ~10 lines in serialization section of `train_gpt_mlx.py`. Add `import zstandard`, swap compressor, add fallback to zlib if not installed.
+**Run**: Best config, same as exp_046.
+**Expect**: Artifact drops ~10-15% (13.1MB → ~11-12MB). BPB unchanged.
+**Why first**: Zero risk, pure compression win, tells us how much headroom we gain.
+
+### Experiment 049: Int6 Quantization [KNOWN]
+**What**: 6-bit per-row quantization for matrix weights (clip to [-31,31], scale=max/31). Embeddings stay fp16, control tensors stay fp32.
+**Code change**: ~30 lines. Add `QUANT_BITS` env var. New `quantize_float_array_int6()` function. Modify `quantize_state_dict_int8` to dispatch based on bits.
+**Run**: Best config + `QUANT_BITS=6`.
+**Expect**: Artifact drops to ~8-9MB. BPB degrades +0.01-0.03 (more on Mac than H100). The point is validating the mechanism, not the absolute BPB.
+**Why**: Fits ~40% more effective params in 16MB. This is what gets competition entries from 1.17 to 1.13.
+
+### Experiment 050: Int6 + Zstd Combined [KNOWN]
+**What**: Both int6 and zstd together.
+**Run**: Best config + `QUANT_BITS=6` + zstd enabled.
+**Expect**: Artifact ~7-8MB. Massive headroom for larger model on H100.
+
+### Experiment 051: Pre-Warmdown QAT (Fix exp_036) [OUR TWIST]
+**What**: Constant-strength QAT (strength=0.1) during pre-warmdown phase only (lr_mul >= 0.8). Stop QAT when warmdown begins. This fixes exp_036's failure where ramping noise fought warmdown convergence.
+**Code change**: ~15 lines. Reuse `sim_quant_int8()`. Add `QAT_PREWARMDOWN` env var, `QAT_STRENGTH` (fixed, not ramping), `QAT_STOP_LR_MUL` (threshold to stop).
+**Run**: Best config + `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`.
+**Expect**: Quant gap shrinks (from ~0.003 to ~0.001). Overall BPB similar or slightly better.
+**Key insight from exp_036**: The mechanism works (quant gap closed to 0.0002) but timing was wrong. Pre-warmdown QAT separates "learning to quantize" from "final convergence."
+
+### Experiment 052: Pre-Warmdown QAT + Int6 [OUR TWIST]
+**What**: QAT with int6 simulation instead of int8.
+**Code change**: Add `sim_quant_int6()`, ~10 more lines.
+**Run**: Best config + int6 QAT.
+**Expect**: Model learns int6-friendly weights. Quant gap at int6 level should shrink.
+
+### Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]
+**What**: During warmdown, add L2 regularization between middle layers (3,4,5) to encourage weight sharing. `L_share = alpha * ||W_3 - W_4||^2 + alpha * ||W_4 - W_5||^2`. Alpha ramps from 0 to 0.1 during warmdown.
+**Code change**: ~20 lines. Add `DEPTH_RECURRENCE_WARMDOWN` env var, compute pairwise L2 between designated layers, add to loss.
+**Run**: Best config + `DEPTH_RECURRENCE_WARMDOWN=1`.
+**Expect**: Middle layer weights converge toward each other. Measure L2 distance between layers before/after. If distance < 5% of weight norm, we can share weights at serialization → ~2-3MB artifact savings.
+**Why original**: Nobody does depth recurrence as a warmdown regularizer. This is "train deep, compress to recurrent."
+**Risk**: Could hurt BPB if alpha too high. Start gentle (0.1).
+
+### Experiment 054: Depth Recurrence (Stronger) [ORIGINAL]
+**What**: Same as 053 but alpha=0.5.
+**Run**: If 053 shows weight convergence, push harder.
+**Expect**: Layers become nearly identical. Artifact savings 3-4MB.
 
 ---
 
-## 🎯 Competition Strategy: "Stack of Originals on a Solid Foundation"
+## After Local Validation: H100 Deployment Order
 
-**Target**: val_bpb ≤ 1.12 on 8xH100 (current leaderboard top: 1.1194)
+Once RunPod is set up, apply validated techniques to `train_gpt.py`:
 
-| Layer | Techniques | Expected BPB | Status |
-|-------|-----------|-------------|--------|
-| Foundation | 11L, batch=524K, SWA (H100 only), int6, TTT, sliding eval | ~1.14-1.15 | To port |
-| Proven Originals | Warmdown-aware WD, freq skip gating | ~1.13-1.14 | Done |
-| New Originals | Warmdown QAT, layer-wise quant | ~1.11-1.12 | To test |
+1. **Port proven MLX features** (~80 lines):
+   - Muon warmdown-aware WD
+   - Frequency-decomposed skip gating
+   - Asymmetric MLP (enc=2x, dec=4x for 11L)
+   - Per-layer LR scaling (LAYER_LR_SCALE=0.5)
 
----
+2. **Set env vars**: NUM_LAYERS=11, GRAD_CLIP_NORM=0.5, WARMUP_STEPS=50, MUON_WEIGHT_DECAY=0.10
 
-## Tier 0: Port to 8xH100 (prerequisite for everything)
+3. **Add int6 + zstd** (from validated local code)
 
-### P1. Port Best Config to PyTorch [KNOWN]
-**What**: Port our 3 code changes to `train_gpt.py`: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating. Set NUM_LAYERS=11, MLP_MULT=3, GRAD_CLIP=0.5, MUON_WEIGHT_DECAY=0.10.
-**Priority**: BLOCKING — everything else depends on this.
-**Effort**: Medium. 3 focused code ports.
+4. **Add pre-warmdown QAT** (from validated local code)
 
----
+5. **Enable TTT LoRA** (already in train_gpt.py, just env vars)
 
-## Tier 1: High Priority — Original Ideas
+6. **Enable sliding window eval** (EVAL_STRIDE=64)
 
-### 1. ~~Warmdown-Phase QAT (Quantization-Aware Training)~~ [**ORIGINAL**] — TESTED exp_036: FAILED
-**Result**: val_bpb=1.6907 (+0.057 regression). Ramping QAT strength during warmdown destroys convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB too bad.
-**Root cause**: Warmdown covers 100%+ of training on Mac (~700 steps, warmdown=1200). No clean convergence phase before QAT noise kicks in. Competition QAT works because it runs for last ~15% of 1500+ steps.
-**Variant to try on H100**: Pre-warmdown constant-strength QAT (e.g., last 200 steps before warmdown begins, at fixed low noise level). This separates convergence from QAT adaptation.
+7. **Try seq_len=2048** (env var, known win from leaderboard)
 
-### 2. Layer-Wise Quantization Budget Allocation [**ORIGINAL**]
-**Hypothesis**: Instead of uniform int6 everywhere, measure quantization sensitivity per layer (how much val_loss degrades when only that layer is quantized). Give sensitive layers int8, insensitive layers int5/int4. Maximize effective capacity in 16MB.
-**Why original**: Mixed-precision approaches exist but decide by architecture position. Ours is empirically data-driven — we measure and allocate.
-**Expected impact**: -0.01 to -0.02 BPB via more effective parameter use.
-**Effort**: Medium. Analysis script + modified quantization.
-**Test on Mac**: Yes — the analysis part. Apply on H100.
+8. **Try depth recurrence** (if validated locally)
 
-### 4. Depth-Recurrent Warmdown [**ORIGINAL**, HIGH RISK]
-**Hypothesis**: During warmdown, gradually tie adjacent layer pairs: blend `w_layer_i` toward `w_layer_{i+1}` with increasing strength. By end of warmdown, pairs share ~50% of weights. Creates a quasi-recurrent transformer that compresses dramatically (shared weights = huge zlib win) while preserving most performance.
-**Why original**: Depth recurrence is a training-time architecture choice. Making it a warmdown regularization technique is entirely novel — train deep, converge to recurrent.
-**Expected impact**: -0.01 to -0.02 BPB + major compression gains.
-**Effort**: High. Complex to implement correctly.
-**Risk**: High — might catastrophically degrade like EMA blending. Start with very gentle blending (α=0.1).
-**Test on Mac**: Yes — the mechanism. Small scale first.
+9. **Try SWA** (H100-only, 1500+ steps may have oscillation)
 
 ---
 
-## Tier 2: Foundation + Known Wins (for 8xH100)
+## Completed (lab/mar26b sessions 1+2)
 
-### 5. ~~SWA~~ [KNOWN] — TESTED exp_037 (wide) + exp_038 (narrow): FAILED on Mac
-**exp_037 (wide, lr_mul<0.5)**: val_bpb=1.7601 (+0.127 regression). 60 snapshots, catastrophic.
-**exp_038 (narrow, lr_mul<0.1)**: val_bpb=1.6363 (+0.003 regression). 24 snapshots, pre-SWA 1.6295 → post-SWA 1.6363 (+0.007). Much better than wide but still hurts.
-**Root cause**: With only ~700 steps on Mac, weights converge monotonically during warmdown. No oscillation to average out. SWA needs 1500+ steps with real oscillatory behavior.
-**Status**: KILLED for Apple Silicon. Still viable for 8xH100 (1500+ steps, potential oscillation).
+### Session 1 (exp_001-034): val_bpb 2.4109 → 1.6334
+- ~~10-layer architecture~~ [KNOWN] — -0.05 BPB
+- ~~Muon weight decay 0.02→0.10~~ [KNOWN] — -0.099 BPB total
+- ~~Warmdown-aware WD scheduling~~ [**ORIGINAL**] — -0.010 BPB extra
+- ~~FP16 tied embeddings~~ [KNOWN] — quant gap +0.0001
+- ~~Sliding window eval~~ [KNOWN] — implemented
+- ~~Frequency-decomposed skip gating~~ [**ORIGINAL**] — -0.010 BPB
+- ~~MLP_MULT=3~~ [KNOWN] — -0.003 BPB
+- ~~Gradient clipping=0.5~~ [SWEEP] — -0.016 BPB
+- ~~Batch scaling to 24576~~ [SWEEP] — -0.082 BPB (biggest single win)
 
-### 6. Int6 Quantization [KNOWN]
-**Hypothesis**: 6-bit quantization for MLP/attention weights. Fits ~40% more effective params in 16MB.
-**Expected impact**: -0.01 to -0.02 BPB (via more capacity).
-**Effort**: Medium. Port int6 quant from competition PRs.
-
-### 7. TTT LoRA at Eval Time [KNOWN]
-**Hypothesis**: Per-document LoRA adaptation during evaluation. Already implemented in train_gpt.py.
-**Expected impact**: -0.01 to -0.02 BPB.
-**Effort**: Low. Already in codebase, just enable.
-
-### 8. 11 Layers [KNOWN]
-**Hypothesis**: 11L is better per-step. On 8xH100 where step time is batch-dominated, the extra layer is nearly free.
-**Expected impact**: -0.01 to -0.02 BPB.
-**Effort**: Env var only.
-
-### 9. Zstd Compression (replace zlib) [KNOWN]
-**Hypothesis**: Zstd at level 22 compresses ~10-15% better than zlib level 9. More compression = more params in 16MB.
-**Expected impact**: +0.5-1MB headroom.
-**Effort**: Low. Swap compressor.
+### Session 2 (exp_035-047): val_bpb 1.6334 → 1.6309
+- ~~Adaptive Newton-Schulz~~ [ORIGINAL] — neutral, killed
+- ~~Warmdown QAT (ramping)~~ [ORIGINAL] — +0.057 BPB, killed (mechanism works, timing wrong)
+- ~~SWA (wide + narrow)~~ [KNOWN] — killed for Mac, H100-only
+- ~~Per-layer LR scaling~~ [OUR TWIST] — -0.001 BPB, kept (LAYER_LR_SCALE=0.5)
+- ~~Asymmetric MLP (2,4)~~ [OUR TWIST] — -0.001 BPB, kept
+- ~~WARMUP_STEPS=50~~ [SWEEP] — -0.0002 BPB, kept
+- ~~Extreme asymmetry (1,5)~~ — worse, killed
+- ~~LAYER_LR_SCALE=1.0~~ — saturated, closed
+- ~~FREQ_SKIP_WINDOW=16~~ — no difference, closed
+- ~~NUM_KV_HEADS=2~~ — worse BPB AND compression, killed
+- ~~LOGIT_SOFTCAP=15~~ — worse, killed
 
 ---
 
-## Tier 3: Speculative / Eval-Time
+## Killed Ideas (full list)
 
-### 10. Cascaded TTT with Document Entropy Priors [**ORIGINAL**]
-**Hypothesis**: Before TTT adaptation per document, initialize LoRA based on document's token entropy. High-entropy (diverse vocab) documents get different init than low-entropy (repetitive) ones. Gives TTT a head start.
-**Expected impact**: -0.005 BPB over vanilla TTT.
-**Effort**: Medium.
-
-### 11. Cross-Layer KV Sharing [**OUR TWIST**]
-**Hypothesis**: Share K/V projections across groups of 2-3 consecutive layers. Dramatically reduces params (saves artifact bytes for more capacity elsewhere).
-**Expected impact**: -0.005 BPB + 1-2MB saved.
-**Effort**: Medium.
-
-### 12. ~~Per-Layer Learning Rate Scaling~~ [**OUR TWIST**] — TESTED exp_039/040/043: Direction confirmed, magnitude saturated
-**Result**: LAYER_LR_SCALE=0.5 (deeper=faster) is marginal new best (1.6321, -0.0013). Inverse direction (LAYER_LR_SCALE=-0.5, exp_040) is clearly worse (1.6463, +0.014). Confirms deeper layers need more LR.
-**Scale saturation (exp_043)**: LAYER_LR_SCALE=1.0 (deepest=2.0x LR) gives 1.6316, nearly identical to scale=0.5 (1.6311). Effect saturates. 0.5 is sufficient.
-**Further tuning**: CLOSED. Direction settled, magnitude saturated. Not worth more experiments.
-
-### 13. Cyclical Batch Size [**ORIGINAL**]
-**Hypothesis**: Cycle batch between 256K and 1M every ~200 steps. Small batches explore, large batches exploit. Same total token budget.
-**Expected impact**: -0.003 to -0.005 BPB.
-**Effort**: Low.
-
----
-
-## Completed (lab/mar26b)
-
-- ~~10-layer architecture~~ [KNOWN] — DONE: -0.05 BPB
-- ~~Muon weight decay=0.02~~ [KNOWN] — DONE: -0.031 BPB, -1.1MB artifact
-- ~~Muon weight decay=0.05, 0.10~~ [SWEEP] — DONE: -0.099 BPB total, 11.0MB artifact
-- ~~Warmdown-aware WD scheduling~~ [**ORIGINAL**] — DONE: -0.110 BPB total, 9.9MB artifact
-- ~~FP16 tied embeddings~~ [KNOWN] — DONE: quant gap +0.0001
-- ~~Sliding window eval~~ [KNOWN] — DONE: implemented, EVAL_STRIDE=64
-- ~~Warmdown tuning~~ [SWEEP] — TESTED: warmdown=400 failed. Keep 1200.
-- ~~11 layers (Mac)~~ [SWEEP] — TESTED: worse on Mac (slower steps), better per-step.
-- ~~Frequency-decomposed skip gating~~ [**ORIGINAL**] — DONE: -0.010 BPB
-- ~~MLP_MULT=3~~ [KNOWN] — DONE: -0.003 BPB. Free capacity win.
-- ~~Gradient clipping=0.5~~ [SWEEP] — DONE: -0.016 BPB. Sweet spot (clip=0.25 too aggressive).
-- ~~Batch scaling~~ [SWEEP] — DONE: batch=24576 optimal on Mac. Marginal returns above this.
-- ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
-- ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
-- ~~SWA (wide + narrow)~~ [KNOWN] — TESTED exp_037 (+0.127) + exp_038 (+0.003). Both fail on Mac. Killed for Apple Silicon. H100-only.
-- ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039/040/043. LAYER_LR_SCALE=0.5 kept (-0.0013 BPB). Inverse (-0.5) worse (+0.014). Scale=1.0 saturates (+0.0005 vs 0.5). CLOSED.
-- ~~Asymmetric MLP width~~ [**OUR TWIST**] — TESTED exp_041: marginal new best (-0.001 BPB). Encoder MLP2x, decoder MLP4x. Same params as uniform MLP3x but better capacity allocation. Kept. exp_042: extreme (1,5) is worse (+0.001 BPB). 2,4 is the sweet spot.
-- ~~Freq skip window tuning~~ [SWEEP] — TESTED exp_044: FREQ_SKIP_WINDOW=16 vs 32 no difference (1.6318 vs 1.6311). Robust to window size. CLOSED.
-- ~~NUM_KV_HEADS=2 (aggressive GQA)~~ [SWEEP] — TESTED exp_045: +0.003 BPB, worse compression (3.64x vs 3.85x). 4 KV heads optimal for 8Q heads. CLOSED.
-- ~~WARMUP_STEPS=50~~ [SWEEP] — TESTED exp_046: marginal new best (1.6309, -0.0002). Both pre-quant (1.6284) and post-quant best ever. Kept — zero cost. Complements GRAD_CLIP_NORM=0.5 for early training stability.
-
----
-
-## Killed Ideas (Evidence Against)
-
-- **Warmdown < 1200**: Warmdown=400 was strictly worse. Long warmdown is beneficial.
-- **INT8_KEEP_FLOAT_MAX_NUMEL increase**: Accidentally keeps all tensors as FP16. Use name patterns.
-- **MoE at 16MB**: Research shows unviable below 500M params.
-- **Label smoothing**: Failed in systematic competition testing.
-- **Concurrent runs on Apple Silicon**: 2-3x throughput degradation.
-- **Muon Momentum Warmdown Ramp**: exp_016 +0.035 BPB regression. High momentum destabilizes Newton-Schulz.
-- **EMA Warmdown Blending**: exp_018 catastrophic. EMA too stale, destroys convergence. (Note: SWA is DIFFERENT — averaging final checkpoints, not blending during training.)
-- **ROPE_BASE=50000**: exp_020 +0.021 BPB regression.
-- **QK_GAIN_INIT=1.0**: exp_021 +0.014 BPB regression.
-- **Shorter warmdown at large batch**: exp_023 +0.029 worse.
-- **DropHead**: exp_025/026. Gradient noise hurts when WD is already strong.
-- **batch=32k with MLP3x**: exp_028 too slow.
-- **11L+MLP3x on Mac**: exp_030 too heavy for Apple Silicon.
-- **WD=0.15/0.20**: Over-regularized.
-- **batch=16k with MLP3x**: exp_031 gradient quality too poor.
-- **Grad clip=0.25**: exp_034 too aggressive, clips useful gradients.
-- **Warmdown QAT (ramping strength)**: exp_036 +0.057 BPB. QAT noise during warmdown fights convergence. Quant gap closes (0.0002) but overall BPB far too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
-- **SWA on Apple Silicon**: exp_037 (wide, +0.127) + exp_038 (narrow, +0.003). With ~700 steps, weights converge monotonically — no oscillation to average. H100-only technique (1500+ steps needed).
-- **Inverse per-layer LR (LAYER_LR_SCALE=-0.5)**: exp_040 +0.014 BPB. Early layers getting higher LR is wrong. Deeper layers need more LR to compensate for gradient attenuation.
-- **Extreme asymmetric MLP (1,5)**: exp_042 +0.001 BPB vs (2,4). Encoder MLP=1x starves feature extraction. 2,4 is the sweet spot for U-Net skip architecture.
-- **FREQ_SKIP_WINDOW=16**: exp_044 +0.0007 BPB vs W=32 (within noise). Frequency decomposition is robust to window size. Not worth tuning.
-- **NUM_KV_HEADS=2 (aggressive GQA)**: exp_045 +0.003 BPB AND worse compression (3.64x vs 3.85x, 14.0MB vs 13.1MB despite fewer params). Fewer KV heads produce less regular weight patterns. Speed gain (830ms vs 848ms) doesn't compensate. 4 KV heads is optimal for 8Q heads.
-- **LOGIT_SOFTCAP=15.0 (tighter clamping)**: exp_047 +0.006 BPB. Constrains model's ability to make confident predictions for common tokens. Default LOGIT_SOFTCAP=30.0 is well-calibrated. Softcap affects prediction confidence, not weight magnitude or compressibility.
+See EXPERIMENT_LOG.md for details. Key killed ideas:
+- Warmdown < 1200, DropHead, EMA blending, momentum ramp
+- ROPE_BASE=50000, QK_GAIN=1.0, WD=0.15/0.20
+- Batch=32k (too slow), 11L+MLP3x on Mac (too heavy)
+- Ramping warmdown QAT, SWA on Mac, inverse layer LR
+- Extreme MLP asymmetry (1,5), KV_HEADS=2, SOFTCAP=15
