@@ -63,34 +63,6 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 
 ---
 
-## After Local Validation: H100 Deployment Order
-
-Once RunPod is set up, apply validated techniques to `train_gpt.py`:
-
-1. **Port proven MLX features** (~80 lines):
-   - Muon warmdown-aware WD
-   - Frequency-decomposed skip gating
-   - Asymmetric MLP (enc=2x, dec=4x for 11L)
-   - Per-layer LR scaling (LAYER_LR_SCALE=0.5)
-
-2. **Set env vars**: NUM_LAYERS=11, GRAD_CLIP_NORM=0.5, WARMUP_STEPS=50, MUON_WEIGHT_DECAY=0.10
-
-3. **Add int6 + zstd** (from validated local code)
-
-4. **Add pre-warmdown QAT** (from validated local code)
-
-5. **Enable TTT LoRA** (already in train_gpt.py, just env vars)
-
-6. **Enable sliding window eval** (EVAL_STRIDE=64)
-
-7. **Try seq_len=2048** (env var, known win from leaderboard)
-
-8. **Try depth recurrence** (if validated locally)
-
-9. **Try SWA** (H100-only, 1500+ steps may have oscillation)
-
----
-
 ## Completed (lab/mar26b sessions 1+2)
 
 ### Session 1 (exp_001-034): val_bpb 2.4109 → 1.6334
