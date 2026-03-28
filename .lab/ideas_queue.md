@@ -24,7 +24,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 
 | Layer | Techniques | Expected BPB | Status |
 |-------|-----------|-------------|--------|
-| Foundation | 11L, batch=524K, SWA, int6, TTT, sliding eval | ~1.14-1.15 | To port |
+| Foundation | 11L, batch=524K, SWA (H100 only), int6, TTT, sliding eval | ~1.14-1.15 | To port |
 | Proven Originals | Warmdown-aware WD, freq skip gating | ~1.13-1.14 | Done |
 | New Originals | Warmdown QAT, layer-wise quant | ~1.11-1.12 | To test |
 
@@ -65,12 +65,11 @@ Prioritized by expected impact. Organized by research direction, not just parame
 
 ## Tier 2: Foundation + Known Wins (for 8xH100)
 
-### 5. ~~SWA Wide Window (lr_mul<0.5)~~ [KNOWN] — TESTED exp_037: FAILED
-**Result**: val_bpb=1.7601 (+0.127 regression). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) is catastrophic. Pre-SWA model was 1.6288.
-**Root cause**: Window too wide. Weights at step 350 and step 706 are too different — averaging them creates a blurry mess.
-**Variant to try**: **Narrow SWA (lr_mul<0.1, last ~70 steps)** or exponential weighting favoring later snapshots. Competition uses last 100-120 steps only.
-**Expected impact of narrow variant**: -0.005 to -0.01 BPB.
-**Effort**: Low. Just change the threshold.
+### 5. ~~SWA~~ [KNOWN] — TESTED exp_037 (wide) + exp_038 (narrow): FAILED on Mac
+**exp_037 (wide, lr_mul<0.5)**: val_bpb=1.7601 (+0.127 regression). 60 snapshots, catastrophic.
+**exp_038 (narrow, lr_mul<0.1)**: val_bpb=1.6363 (+0.003 regression). 24 snapshots, pre-SWA 1.6295 → post-SWA 1.6363 (+0.007). Much better than wide but still hurts.
+**Root cause**: With only ~700 steps on Mac, weights converge monotonically during warmdown. No oscillation to average out. SWA needs 1500+ steps with real oscillatory behavior.
+**Status**: KILLED for Apple Silicon. Still viable for 8xH100 (1500+ steps, potential oscillation).
 
 ### 6. Int6 Quantization [KNOWN]
 **Hypothesis**: 6-bit quantization for MLP/attention weights. Fits ~40% more effective params in 16MB.
@@ -134,7 +133,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Batch scaling~~ [SWEEP] — DONE: batch=24576 optimal on Mac. Marginal returns above this.
 - ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
 - ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
-- ~~SWA wide window (lr_mul<0.5)~~ [KNOWN] — TESTED exp_037: FAILED (+0.127 BPB). Window too wide. Narrow variant (lr_mul<0.1) still viable.
+- ~~SWA (wide + narrow)~~ [KNOWN] — TESTED exp_037 (+0.127) + exp_038 (+0.003). Both fail on Mac. Killed for Apple Silicon. H100-only.
 
 ---
 
@@ -157,3 +156,4 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - **batch=16k with MLP3x**: exp_031 gradient quality too poor.
 - **Grad clip=0.25**: exp_034 too aggressive, clips useful gradients.
 - **Warmdown QAT (ramping strength)**: exp_036 +0.057 BPB. QAT noise during warmdown fights convergence. Quant gap closes (0.0002) but overall BPB far too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
+- **SWA on Apple Silicon**: exp_037 (wide, +0.127) + exp_038 (narrow, +0.003). With ~700 steps, weights converge monotonically — no oscillation to average. H100-only technique (1500+ steps needed).

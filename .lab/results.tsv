@@ -21,3 +21,4 @@ c8c2028	1.651780	10804460	keep	exp_024: TRAIN_BATCH_TOKENS=24576 — NEW BEST -0
 4ef8635	1.6352	13007336	discard	exp_035: adaptive Newton-Schulz scheduling (5→7 warmdown) — neutral, +0.0018 vs best
 c1997cd	1.6907	12837630	discard	exp_036: warmdown-phase QAT — inject int8 quant noise during warmdown. +0.057 BPB regression
 cb8781e	1.7601	12591903	discard	exp_037: SWA (uniform avg 60 snapshots, lr_mul<0.5) — +0.127 BPB regression. Pre-SWA was 1.6288
+6cb6f99	1.636228	13037809	discard	exp_038: narrow SWA (lr_mul < 0.1, 24 snapshots) — +0.003 vs best. SWA hurts on Mac.

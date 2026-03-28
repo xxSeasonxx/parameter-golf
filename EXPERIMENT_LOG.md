@@ -50,6 +50,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 035 | exp_035_adaptive_ns_med | Adaptive NS scheduling (5→7 warmdown) | 695/2000 | 1.6352 | 13.0MB | Discard | Neutral: +0.0018 vs best. NS converges fine at 5 iters for dim=512 |
 | 036 | exp_036_qat_warmdown | Warmdown-phase QAT (int8 noise ramp) | 709/2000 | 1.6907 | 12.8MB | Discard | +0.057 BPB regression. QAT noise fights warmdown convergence. Quant gap 0.0002 (excellent) |
 | 037 | exp_037_swa | SWA (uniform avg 60 snapshots, lr_mul<0.5) | 706/2000 | 1.7601 | 12.6MB | Discard | +0.127 BPB regression. Wide SWA window catastrophic. Pre-SWA was 1.6288 |
+| 038 | exp_038_swa_narrow | Narrow SWA (lr_mul<0.1, 24 snapshots, every 5 steps) | 704/2000 | 1.6363 | 13.0MB | Discard | +0.003 vs best. Pre-SWA 1.6295→post-SWA 1.6363. SWA killed for Mac |
 
 ---
 
@@ -382,6 +383,28 @@ if self.args.muon_weight_decay > 0:
 - Better compression (12.6MB vs 13.0MB) confirms that weight averaging smooths the parameter landscape and improves compressibility.
 - Must try: SWA_START_LR_MUL=0.1 (last ~70 steps only) or exponential weighting favoring later snapshots.
 - This failure is analogous to EMA (exp_018) in that both average over too much training history. The key is narrowness: only average weights that are already very close to the final solution.
+
+---
+
+### Experiment 038: Narrow SWA (Discard — SWA Killed for Mac)
+
+**Hypothesis**: Narrow SWA window (lr_mul < 0.1, every 5 steps, ~24 snapshots) should avoid the catastrophic regression of wide SWA (exp_037, lr_mul < 0.5, 60 snapshots). Competition entries use narrow windows (last 100-120 steps).
+
+**What happened**:
+- Pre-SWA val_bpb=**1.6295** — within noise of best (1.6334).
+- After SWA averaging 24 snapshots (lr_mul < 0.1): val_bpb=**1.6363 (int8)** — **+0.003 BPB** vs best, **+0.007** vs the pre-SWA model.
+- 704 steps at 853ms/step. Artifact: 13.0MB.
+
+**Comparison with wide SWA (exp_037)**:
+- Wide (lr_mul < 0.5, 60 snapshots): +0.131 BPB regression from pre-SWA.
+- Narrow (lr_mul < 0.1, 24 snapshots): +0.007 BPB regression from pre-SWA.
+- Narrow is 18x less destructive, but still a net negative.
+
+**Root cause**: With only ~700 total steps, weights converge monotonically during the warmdown phase. There is no oscillatory behavior to average out — each successive snapshot is strictly closer to the minimum. Averaging earlier snapshots with later ones can only regress toward a less-converged point.
+
+**Key insight**: SWA's theoretical benefit comes from averaging across oscillations in a flat loss basin. With 1500+ steps (as on 8xH100), the model may oscillate during late warmdown. With ~700 steps on Mac, the loss curve is monotonically decreasing throughout — SWA has nothing useful to average.
+
+**Decision**: **KILL SWA for all Apple Silicon experiments.** SWA remains viable for 8xH100 testing where longer training may produce the oscillatory dynamics SWA is designed to exploit.
 
 ---
 
