@@ -9,7 +9,7 @@ commit: 3af0786
 val_bpb: 1.6311 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5)
 artifact: 13,075,651 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_041_asymmlp.txt
-next_exp: 043
+next_exp: 044
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -63,6 +63,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **SWA with wide window is catastrophic**: exp_037 val_bpb=1.7601 (+0.127). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) destroys convergence. Pre-SWA model was 1.6288 (within noise of best). Competition uses narrow SWA (last 100-120 steps, lr_mul<0.1) or high-decay EMA (0.9999). Better compression though (12.6MB vs 13.0MB).
 - **SWA with narrow window still hurts on Mac**: exp_038 val_bpb=1.6363 (+0.003). 24 snapshots, lr_mul<0.1, every 5 steps. Pre-SWA was 1.6295, post-SWA 1.6363 (+0.007). Much better than wide SWA but still a regression. With only ~700 steps, weights monotonically converge during warmdown — no oscillation to average out. **SWA is KILLED for Apple Silicon experiments.** May still help on 8xH100 with 1500+ steps.
 - **Per-layer LR scaling is marginally positive**: exp_039 LAYER_LR_SCALE=0.5 gives val_bpb=1.6321 (-0.0013 vs best). Deeper layers get higher LR (1.0x to 1.5x range). Within noise but zero overhead, so keeping it. May show larger gains on H100 with more steps.
+- **Layer LR scale saturates between 0.5 and 1.0**: exp_043 LAYER_LR_SCALE=1.0 (deepest=2.0x LR) gives val_bpb=1.6316 (+0.0005 vs best). Nearly identical to scale=0.5 (1.6311). Not worth fine-tuning further — 0.5 is sufficient.
 - **Inverse layer LR is clearly wrong direction**: exp_040 LAYER_LR_SCALE=-0.5 gives val_bpb=1.6463 (+0.014 regression). Confirms deeper layers need MORE LR, not less. Interesting: better compression (12.5MB vs 13.2MB) with inverse — later layers with lower LR produce simpler weights.
 
 ## Evaluation

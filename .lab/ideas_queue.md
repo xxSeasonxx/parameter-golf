@@ -105,9 +105,10 @@ Prioritized by expected impact. Organized by research direction, not just parame
 **Expected impact**: -0.005 BPB + 1-2MB saved.
 **Effort**: Medium.
 
-### 12. ~~Per-Layer Learning Rate Scaling~~ [**OUR TWIST**] — TESTED exp_039/040: Direction confirmed
+### 12. ~~Per-Layer Learning Rate Scaling~~ [**OUR TWIST**] — TESTED exp_039/040/043: Direction confirmed, magnitude saturated
 **Result**: LAYER_LR_SCALE=0.5 (deeper=faster) is marginal new best (1.6321, -0.0013). Inverse direction (LAYER_LR_SCALE=-0.5, exp_040) is clearly worse (1.6463, +0.014). Confirms deeper layers need more LR.
-**Further tuning**: Low priority. Direction settled. Scale magnitude (0.3, 0.7) not worth more Mac experiments.
+**Scale saturation (exp_043)**: LAYER_LR_SCALE=1.0 (deepest=2.0x LR) gives 1.6316, nearly identical to scale=0.5 (1.6311). Effect saturates. 0.5 is sufficient.
+**Further tuning**: CLOSED. Direction settled, magnitude saturated. Not worth more experiments.
 
 ### 13. Cyclical Batch Size [**ORIGINAL**]
 **Hypothesis**: Cycle batch between 256K and 1M every ~200 steps. Small batches explore, large batches exploit. Same total token budget.
@@ -133,7 +134,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
 - ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
 - ~~SWA (wide + narrow)~~ [KNOWN] — TESTED exp_037 (+0.127) + exp_038 (+0.003). Both fail on Mac. Killed for Apple Silicon. H100-only.
-- ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039: marginal new best (-0.0013 BPB). LAYER_LR_SCALE=0.5 kept. exp_040: inverse (-0.5) clearly worse (+0.014). Direction confirmed.
+- ~~Per-layer LR scaling~~ [**OUR TWIST**] — TESTED exp_039/040/043. LAYER_LR_SCALE=0.5 kept (-0.0013 BPB). Inverse (-0.5) worse (+0.014). Scale=1.0 saturates (+0.0005 vs 0.5). CLOSED.
 - ~~Asymmetric MLP width~~ [**OUR TWIST**] — TESTED exp_041: marginal new best (-0.001 BPB). Encoder MLP2x, decoder MLP4x. Same params as uniform MLP3x but better capacity allocation. Kept. exp_042: extreme (1,5) is worse (+0.001 BPB). 2,4 is the sweet spot.
 
 ---

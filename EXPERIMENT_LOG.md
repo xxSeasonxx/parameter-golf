@@ -55,6 +55,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 040 | exp_040_layerlr_inv | Inverse layer LR (LAYER_LR_SCALE=-0.5) | 702/2000 | 1.6463 | 12.5MB | Discard | +0.014 BPB. Early layers higher LR is wrong direction. Confirms deeper=faster is correct |
 | **041** | **exp_041_asymmlp** | **Asymmetric MLP (encoder=2x, decoder=4x)** | **708/2000** | **1.6311** | **13.1MB** | **BEST** | **-0.001 BPB. Same params as uniform MLP3x but better allocation** |
 | 042 | exp_042_asym15 | Extreme asymmetric MLP (1,5) | 708/2000 | 1.6321 | 12.7MB | Discard | +0.001 vs best. Encoder MLP=1x too aggressive, starves feature extraction |
+| 043 | exp_043_layerlr10 | LAYER_LR_SCALE=1.0 (deepest=2x LR) | 706/2000 | 1.6316 | 13.1MB | Discard | +0.0005 vs best. Scale saturates between 0.5-1.0. 0.5 sufficient |
 
 ---
 
@@ -492,6 +493,21 @@ if self.args.muon_weight_decay > 0:
 - The slightly better compression (12.7MB vs 13.1MB) confirms that smaller encoder MLPs have less weight entropy, but the BPB cost is not worth it.
 
 **Decision**: **DISCARD**. Keep MLP_MULT_ASYMMETRIC=2,4.
+
+---
+
+### Experiment 043: LAYER_LR_SCALE=1.0 (Discard)
+
+**Hypothesis**: LAYER_LR_SCALE=1.0 gives deeper layers 2.0x LR (vs 1.5x at scale=0.5). If deeper layers benefit from more LR, doubling the scale should help further.
+
+**What happened**: val_bpb=1.6316 (int8) -- +0.0005 BPB worse than best (1.6311). Pre-quant val_bpb=1.6296. 706 steps at 850ms/step. Artifact: 13,128,949 bytes (~13.1MB). Pure env-var change, no code modifications.
+
+**Learnings**:
+- LAYER_LR_SCALE=0.5 (1.6311) and 1.0 (1.6316) are nearly identical. The effect of per-layer LR scaling saturates between 0.5 and 1.0.
+- The full picture: scale=-0.5 (1.6463, wrong direction) → scale=0.0 (baseline) → scale=0.5 (1.6311, marginal best) → scale=1.0 (1.6316, no further gain). Diminishing returns past 0.5.
+- Per-layer LR scaling is a micro-optimization. The direction matters (deeper=faster) but the magnitude barely matters in the 0.5-1.0 range. Not worth further tuning.
+
+**Decision**: **DISCARD**. Keep LAYER_LR_SCALE=0.5.
 
 ---
 

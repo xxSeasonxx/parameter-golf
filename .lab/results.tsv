@@ -26,3 +26,4 @@ cb8781e	1.7601	12591903	discard	exp_037: SWA (uniform avg 60 snapshots, lr_mul<0
 64f6017	1.6463	12526015	discard	exp_040: inverse layer LR (LAYER_LR_SCALE=-0.5) — +0.014 BPB, wrong direction
 3af0786	1.6311	13075651	keep	exp_041: asymmetric MLP width (encoder MLP2x/decoder MLP4x) — MARGINAL NEW BEST
 087ada9	1.6321	12692603	discard	exp_042: extreme asymmetric MLP (1,5) — +0.001 vs best (2,4). Encoder needs MLP capacity
+3e188d1	1.6316	13128949	discard	exp_043: LAYER_LR_SCALE=1.0 — +0.0005 vs best. Scale saturates, 0.5 sufficient
