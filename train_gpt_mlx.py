@@ -102,6 +102,12 @@ class Hyperparameters:
     muon_weight_decay: float = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
+    # SWA: average model weights from the last portion of warmdown.
+    # swa_start_lr_mul: start collecting when lr_mul drops below this (0=disabled).
+    # Collects every swa_every steps. Final model = average of all collected snapshots.
+    swa_start_lr_mul: float = float(os.environ.get("SWA_START_LR_MUL", 0.0))
+    swa_every: int = int(os.environ.get("SWA_EVERY", 10))
+
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
     # stride=64 matches the competition's best evaluation strategy.
@@ -1210,6 +1216,8 @@ def main() -> None:
     train_time_ms = 0.0
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     stop_after_step: int | None = None
+    swa_snapshots: list[dict[str, mx.array]] = []
+    swa_count = 0
     t0 = time.perf_counter()
     step = 0
     while True:
@@ -1256,6 +1264,14 @@ def main() -> None:
         grads = clip_grad_tree(grads, args.grad_clip_norm)
         train_loss_value = float(train_loss.item())  # .item() triggers mx.eval() for this scalar
         opt.step(model, grads, step=step, lr_mul=lr_mul)
+
+        # SWA: collect weight snapshots during late warmdown for averaging.
+        if args.swa_start_lr_mul > 0 and lr_mul < args.swa_start_lr_mul and step % args.swa_every == 0:
+            snap = {k: v.astype(mx.float32) for k, v in tree_flatten(model.parameters())}
+            mx.eval(*snap.values())  # materialize before appending
+            swa_snapshots.append(snap)
+            swa_count += 1
+
         # mx.synchronize() is the timing fence — everything above is lazy/async. This blocks
         # until all Metal GPU work finishes, giving accurate wall-clock step timing.
         mx.synchronize()
@@ -1271,6 +1287,24 @@ def main() -> None:
             )
         if max_wallclock_ms is not None and stop_after_step is None and approx_train_time_ms >= max_wallclock_ms:
             stop_after_step = step
+
+    # ==============================================================================
+    # SWA: AVERAGE COLLECTED SNAPSHOTS
+    # ==============================================================================
+    if swa_count >= 2:
+        log(f"swa:averaging {swa_count} snapshots")
+        avg_params: dict[str, mx.array] = {}
+        for k in swa_snapshots[0]:
+            stacked = mx.stack([s[k] for s in swa_snapshots])
+            avg_params[k] = mx.mean(stacked, axis=0)
+        # Cast back to original dtypes and update model
+        orig_params = dict(tree_flatten(model.parameters()))
+        for k in avg_params:
+            avg_params[k] = avg_params[k].astype(orig_params[k].dtype)
+        model.update(tree_unflatten(list(avg_params.items())))
+        mx.eval(*[v for _, v in tree_flatten(model.parameters())])
+        del swa_snapshots  # free memory
+        log(f"swa:applied average of {swa_count} snapshots")
 
     # ==============================================================================
     # FINAL SERIALIZATION + QUANTIZED ROUNDTRIP EVAL
