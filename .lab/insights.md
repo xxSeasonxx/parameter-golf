@@ -5,16 +5,16 @@ Validated learnings from experiments. Single source of truth. Delete disproven h
 ## Current Best
 
 ```
-commit: a719ef8
-val_bpb: 1.6434 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=1.0, TRAIN_BATCH_TOKENS=24576)
-artifact: 12,981,953 bytes (~13.0MB, 3.0MB headroom)
-log: logs/exp_032_gradclip.txt
-next_exp: 033
+commit: 5dffd6e
+val_bpb: 1.6334 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, TRAIN_BATCH_TOKENS=24576)
+artifact: 13,023,930 bytes (~13.0MB, 3.0MB headroom)
+log: logs/exp_033_gradclip05.txt
+next_exp: 034
 ```
 
 **Best config env vars** (copy-paste for runs):
 ```
-NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT=3 GRAD_CLIP_NORM=1.0
+NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT=3 GRAD_CLIP_NORM=0.5
 ```
 Note: Warmdown-aware WD scheduling is in the code: `wd = base_wd * (2 - lr_mul)`
 Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 default)
@@ -52,7 +52,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Never run concurrent**: 2-3x throughput degradation.
 - **Hyperparameter sweeps at batch=8192 are NOT representative**: RoPE and QK gain tuning showed no gains. Focus on batch scaling and architectural ideas.
 - **DropHead hurts**: p=0.1 (+0.008 BPB) and p=0.05 (+0.006 BPB). Stochastic head masking adds gradient noise that isn't compensated by regularization benefit when WD is already strong.
-- **Gradient clipping (GRAD_CLIP_NORM=1.0) helps**: -0.006 BPB. Stabilizes early training (loss spikes to 17.9 in first few steps). No step time overhead.
+- **Gradient clipping is a major lever**: clip=1.0 gives -0.006, clip=0.5 gives -0.016 BPB total. Stabilizes early training (loss spikes to 17.9 without clipping). The response curve: no_clip→1.6492, clip=1.0→1.6434, clip=0.5→1.6334. Stronger clipping is better (so far).
 - **Batch=16k with MLP3x is too small**: val_bpb=1.6692 despite 937 steps. Gradient quality dominates.
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.
