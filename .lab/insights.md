@@ -9,7 +9,7 @@ commit: 5dffd6e
 val_bpb: 1.6334 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, TRAIN_BATCH_TOKENS=24576)
 artifact: 13,023,930 bytes (~13.0MB, 3.0MB headroom)
 log: logs/exp_033_gradclip05.txt
-next_exp: 036
+next_exp: 037
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -57,6 +57,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Batch=16k with MLP3x is too small**: val_bpb=1.6692 despite 937 steps. Gradient quality dominates.
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.
+- **Warmdown QAT (ramping strength) is too aggressive**: exp_036 val_bpb=1.6907 (+0.057). QAT noise fights warmdown convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB suffers badly. Don't inject quant noise during the convergence-critical warmdown phase. A pre-warmdown QAT phase or constant low-strength QAT might work on H100 with more steps.
 
 ## Evaluation
 
@@ -77,7 +78,7 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 **Our original contributions** (differentiators):
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
 2. Frequency-decomposed skip gating — proven, unique
-3. Warmdown-phase QAT (NEW, to test) — integrate quant noise into warmdown schedule
+3. ~~Warmdown-phase QAT~~ — FAILED (exp_036, +0.057 BPB). Ramping QAT during warmdown kills convergence. Quant gap closes (0.0002) but BPB too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
 4. Layer-wise quantization budget allocation (NEW, to test) — data-driven per-layer precision
 
 **Known techniques to add** (table stakes):

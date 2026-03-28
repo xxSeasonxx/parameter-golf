@@ -41,13 +41,10 @@ Prioritized by expected impact. Organized by research direction, not just parame
 
 ## Tier 1: High Priority — Original Ideas
 
-### 1. Warmdown-Phase QAT (Quantization-Aware Training) [**ORIGINAL**]
-**Hypothesis**: Integrate int6 quantization noise into our warmdown schedule rather than running QAT as a separate phase. During warmdown, every K steps, replace weights with `dequant(quant_int6(w))`. Three forces act in concert: ↓LR (finer adjustments), ↑WD (push weights toward zero), and quant noise (teach model to tolerate int6 rounding).
-**Why original**: Standard QAT is a separate training phase with its own LR schedule. Our QAT is co-designed with warmdown-aware WD — the three forces are synchronized, not independent. Nobody in competition does this.
-**Why high priority**: Int6 is what gets submissions from ~1.17 to ~1.13. Our warmdown integration could do it better.
-**Expected impact**: -0.01 to -0.03 BPB.
-**Effort**: Medium. ~30 lines: int6 quant/dequant functions + injection in warmdown.
-**Test on Mac**: Yes — can validate the mechanism at int8 scale first.
+### 1. ~~Warmdown-Phase QAT (Quantization-Aware Training)~~ [**ORIGINAL**] — TESTED exp_036: FAILED
+**Result**: val_bpb=1.6907 (+0.057 regression). Ramping QAT strength during warmdown destroys convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB too bad.
+**Root cause**: Warmdown covers 100%+ of training on Mac (~700 steps, warmdown=1200). No clean convergence phase before QAT noise kicks in. Competition QAT works because it runs for last ~15% of 1500+ steps.
+**Variant to try on H100**: Pre-warmdown constant-strength QAT (e.g., last 200 steps before warmdown begins, at fixed low noise level). This separates convergence from QAT adaptation.
 
 ### 2. Layer-Wise Quantization Budget Allocation [**ORIGINAL**]
 **Hypothesis**: Instead of uniform int6 everywhere, measure quantization sensitivity per layer (how much val_loss degrades when only that layer is quantized). Give sensitive layers int8, insensitive layers int5/int4. Maximize effective capacity in 16MB.
@@ -135,6 +132,7 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - ~~Gradient clipping=0.5~~ [SWEEP] — DONE: -0.016 BPB. Sweet spot (clip=0.25 too aggressive).
 - ~~Batch scaling~~ [SWEEP] — DONE: batch=24576 optimal on Mac. Marginal returns above this.
 - ~~Adaptive Newton-Schulz scheduling~~ [**ORIGINAL**] — TESTED: neutral (+0.0018 BPB). NS converges fine at 5 iters for dim=512.
+- ~~Warmdown-phase QAT~~ [**ORIGINAL**] — TESTED exp_036: FAILED (+0.057 BPB). QAT noise fights warmdown convergence. Variant (pre-warmdown constant QAT) still viable on H100.
 
 ---
 
@@ -156,3 +154,4 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - **WD=0.15/0.20**: Over-regularized.
 - **batch=16k with MLP3x**: exp_031 gradient quality too poor.
 - **Grad clip=0.25**: exp_034 too aggressive, clips useful gradients.
+- **Warmdown QAT (ramping strength)**: exp_036 +0.057 BPB. QAT noise during warmdown fights convergence. Quant gap closes (0.0002) but overall BPB far too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.

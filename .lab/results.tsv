@@ -19,3 +19,4 @@ c8c2028	1.687706	11481740	discard	exp_023: batch=16k + warmdown=600 — +0.029 B
 c8c2028	1.651780	10804460	keep	exp_024: TRAIN_BATCH_TOKENS=24576 — NEW BEST -0.007 BPB. Batch scaling continues
 996244b	1.6334	13023930	keep	exp_033: MLP3x + GRAD_CLIP=0.5 — BEST
 4ef8635	1.6352	13007336	discard	exp_035: adaptive Newton-Schulz scheduling (5→7 warmdown) — neutral, +0.0018 vs best
+c1997cd	1.6907	12837630	discard	exp_036: warmdown-phase QAT — inject int8 quant noise during warmdown. +0.057 BPB regression

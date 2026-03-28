@@ -48,6 +48,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | **033** | **exp_033_gradclip05** | **MLP3x + GRAD_CLIP=0.5** | **698/2000** | **1.6334** | **13.0MB** | **BEST** | **-0.016 BPB total. Stronger clip is better** |
 | 034 | exp_034_gradclip025 | MLP3x + GRAD_CLIP=0.25 | 690/2000 | 1.6362 | 13.0MB | Discard | Too aggressive: +0.003 vs clip=0.5. Clips useful gradients |
 | 035 | exp_035_adaptive_ns_med | Adaptive NS scheduling (5→7 warmdown) | 695/2000 | 1.6352 | 13.0MB | Discard | Neutral: +0.0018 vs best. NS converges fine at 5 iters for dim=512 |
+| 036 | exp_036_qat_warmdown | Warmdown-phase QAT (int8 noise ramp) | 709/2000 | 1.6907 | 12.8MB | Discard | +0.057 BPB regression. QAT noise fights warmdown convergence. Quant gap 0.0002 (excellent) |
 
 ---
 
@@ -336,6 +337,26 @@ if self.args.muon_weight_decay > 0:
 - Newton-Schulz already converges well at 5 iterations for dim=512. The error from 5 vs 7 iterations is negligible compared to gradient noise.
 - The pre-quant result (1.6321 vs best's ~1.630) hints at a tiny real effect, but it is masked by quantization noise and not worth the complexity.
 - Don't schedule NS iterations -- 5 is sufficient for this model size.
+
+---
+
+### Experiment 036: Warmdown-Phase QAT (Discard)
+
+**Hypothesis**: Inject simulated int8 quantization noise during warmdown, with strength ramping from 0 (at lr_mul=1) to 1 (at lr_mul=0). The QAT noise should synergize with warmdown-aware WD — three forces (decaying LR, increasing WD, increasing quant noise) converging the model to a quantization-friendly minimum.
+
+**What happened**: val_bpb=1.6907 (int8) — **+0.057 BPB regression** vs best (1.6334). 709 steps at 847ms/step. Artifact: 12.8MB (slightly better compression than best's 13.0MB).
+
+**The good**: The quantization gap was only 0.0002 BPB (pre-quant 1.6905, int8 1.6907). This proves the QAT mechanism works for closing the quant gap — the model genuinely learned to tolerate int8 rounding.
+
+**The bad**: The overall BPB suffered massively. QAT noise during warmdown fights the optimizer's convergence. Warmdown is when the model does its finest convergence toward a flat minimum — injecting noise during this critical phase is counterproductive.
+
+**Root cause**: With only ~700 total steps and warmdown_iters=1200 (meaning warmdown covers 100%+ of training), QAT noise is active for essentially the entire run with increasing strength. There is no "clean" convergence phase followed by a brief QAT adaptation. Competition QAT works because it runs for the last ~15% of 1500+ steps — a brief adaptation after the model has already converged. Our warmdown covers everything.
+
+**Learnings**:
+- Warmdown QAT with ramping strength is fundamentally misdesigned for our setup. The convergence-critical warmdown phase cannot tolerate additional noise.
+- The quant gap closure (0.0002 BPB) validates that QAT works mechanistically. But it needs to happen BEFORE warmdown, not during it.
+- Better compression (12.8MB vs 13.0MB) suggests QAT does push weights toward more quantization-friendly values.
+- A gentler variant (constant low QAT strength, or QAT applied only before warmdown begins) might work, especially on 8xH100 with more steps and a proper pre-warmdown phase.
 
 ---
 
