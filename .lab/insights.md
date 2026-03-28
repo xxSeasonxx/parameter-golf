@@ -9,7 +9,7 @@ commit: 5dffd6e
 val_bpb: 1.6334 (Apple Silicon, 10L, MLP_MULT=3, GRAD_CLIP_NORM=0.5, TRAIN_BATCH_TOKENS=24576)
 artifact: 13,023,930 bytes (~13.0MB, 3.0MB headroom)
 log: logs/exp_033_gradclip05.txt
-next_exp: 034
+next_exp: 035
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -63,6 +63,30 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 
 ## Porting to 8xH100
 
-Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) sliding window eval.
-Env vars: NUM_LAYERS=10 (or 11), MUON_WEIGHT_DECAY=0.10.
-Expected: ~1500-2000 steps, val_bpb ~1.18-1.20 (gap is data volume, not architecture).
+Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval.
+Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT=3, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5.
+Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
+
+## Competition Strategy (8xH100 target: ≤1.12 BPB)
+
+**Leaderboard top**: 1.1194 (as of 2026-03-28). Our estimated ported result: ~1.18-1.20.
+
+**Key constraint shift from Mac → H100**: Step time is batch-dominated (524K tokens/step). 11L, MLP3x are free. Artifact size (16MB) is the binding constraint. Eval-time compute is unlimited.
+
+**Our original contributions** (differentiators):
+1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
+2. Frequency-decomposed skip gating — proven, unique
+3. Warmdown-phase QAT (NEW, to test) — integrate quant noise into warmdown schedule
+4. Adaptive Newton-Schulz scheduling (NEW, to test) — schedule NS iterations 3→5→7
+5. Layer-wise quantization budget allocation (NEW, to test) — data-driven per-layer precision
+
+**Known techniques to add** (table stakes):
+- SWA (average final checkpoints, NOT EMA blending which failed)
+- Int6 quantization (MLP/attention weights)
+- TTT LoRA at eval time (already in codebase)
+- Zstd-22 compression (replace zlib)
+
+**Priority order for Mac testing** (validate mechanisms before H100):
+1. Adaptive NS scheduling (3 lines, immediate test)
+2. Warmdown QAT mechanism (int8 on Mac, int6 on H100)
+3. Depth-recurrent warmdown (high risk, start gentle)
