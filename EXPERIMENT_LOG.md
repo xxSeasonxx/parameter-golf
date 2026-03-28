@@ -57,6 +57,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 042 | exp_042_asym15 | Extreme asymmetric MLP (1,5) | 708/2000 | 1.6321 | 12.7MB | Discard | +0.001 vs best. Encoder MLP=1x too aggressive, starves feature extraction |
 | 043 | exp_043_layerlr10 | LAYER_LR_SCALE=1.0 (deepest=2x LR) | 706/2000 | 1.6316 | 13.1MB | Discard | +0.0005 vs best. Scale saturates between 0.5-1.0. 0.5 sufficient |
 | 044 | exp_044_fsw16 | FREQ_SKIP_WINDOW=16 (smaller window) | 701/2000 | 1.6318 | 13.1MB | Discard | +0.0007 vs best. Window size doesn't matter. W=32 is fine |
+| 045 | exp_045_kv2 | NUM_KV_HEADS=2 (aggressive GQA) | 723/2000 | 1.6345 | 14.0MB | Discard | +0.003 vs best. Fewer KV heads hurts BPB and compression |
 
 ---
 
@@ -560,6 +561,34 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 **Analysis**: The frequency decomposition in skip gating is robust to window size. W=16 (finer resolution, more frequency bands) performs identically to W=32 (coarser, fewer bands). This makes sense: the key insight of freq skip gating is the low/high frequency *decomposition itself*, not the exact cutoff. The per-dim gating weights learn to compensate for whatever window size is used. Not worth tuning further.
 
 **Key learning**: FREQ_SKIP_WINDOW is not a lever. W=32 default is fine.
+
+---
+
+### Experiment 045: NUM_KV_HEADS=2 — Aggressive GQA (Discard)
+
+**Hypothesis**: Reducing KV heads from 4 to 2 (more aggressive GQA with 8 query heads) saves ~1.3M params, giving faster steps. The saved capacity might be better spent elsewhere or the speed gain might allow more training steps.
+
+**Config**: Pure env-var change: `NUM_KV_HEADS=2`. All else identical to exp_041 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6328** at step 723 (vs 708 steps for exp_041).
+- Int8 val_bpb=**1.6345** — **+0.003 BPB worse** than best (1.6311).
+- 723 steps at 830ms/step (faster than exp_041's 848ms). Artifact: 14,035,696 bytes (~14.0MB).
+- Params: 22.8M (vs 24.1M for 4 KV heads).
+
+**Analysis**:
+- The speed gain is real: 830ms vs 848ms per step, yielding 723 steps vs 708 steps (+15 more steps in 10 min).
+- But BPB is worse by 0.003 — the extra 15 steps do not compensate for reduced attention capacity.
+- Artifact is significantly larger: 14.0MB vs 13.1MB despite fewer params (22.8M vs 24.1M). Compression ratio dropped from 3.85x to 3.64x.
+- Fewer KV heads produce less regular weight patterns, hurting zlib compression. With 4 KV heads shared across 8 query heads, each KV head serves exactly 2 query heads — a clean 2:1 mapping. With 2 KV heads serving 4 query heads each, the attention patterns are less structured and compress worse.
+
+**Learnings**:
+- 2 KV heads hurts both BPB (+0.003) and compressibility (3.64x vs 3.85x). A double loss.
+- The speed gain (830ms vs 848ms, +15 steps) does not compensate for reduced attention capacity.
+- 4 KV heads is the sweet spot for 8 query heads. The 2:1 Q/KV ratio provides enough attention diversity while keeping params and compression reasonable.
+- Don't reduce KV heads below 4.
+
+**Decision**: **DISCARD**. Keep NUM_KV_HEADS=4 (default).
 
 ---
 
