@@ -79,6 +79,9 @@ class Hyperparameters:
     num_heads: int = int(os.environ.get("NUM_HEADS", 8))
     num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
     mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
+    # Asymmetric MLP: separate multipliers for encoder and decoder halves.
+    # If set, overrides mlp_mult. Format: "encoder_mult,decoder_mult" e.g. "2,4"
+    mlp_mult_asymmetric: str = os.environ.get("MLP_MULT_ASYMMETRIC", "")
     tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
@@ -420,7 +423,8 @@ class GPT(nn.Module):
     # - tied embeddings for the LM head (the baseline default setup)
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32):
+                 qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
+                 mlp_mult_asymmetric: str = ""):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -438,8 +442,14 @@ class GPT(nn.Module):
             self.skip_hi_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         else:
             self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        # Per-layer MLP width: asymmetric allows different encoder/decoder widths
+        if mlp_mult_asymmetric:
+            enc_m, dec_m = (int(x) for x in mlp_mult_asymmetric.split(","))
+            layer_mlp_mults = [enc_m] * self.num_encoder_layers + [dec_m] * self.num_decoder_layers
+        else:
+            layer_mlp_mults = [mlp_mult] * num_layers
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            Block(dim, num_heads, num_kv_heads, layer_mlp_mults[i], rope_base, qk_gain_init)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -1104,6 +1114,7 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
+        mlp_mult_asymmetric=args.mlp_mult_asymmetric,
     )
     opt = SplitOptimizers(model, args)
 
