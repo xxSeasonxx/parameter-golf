@@ -102,50 +102,8 @@ Status starts as `pending`. You update it to `keep` or `discard` after deciding.
 
 **LOOP FOREVER:**
 
-### 0. REFRESH
-Re-read this file (`program.md`). Context gets long and you will forget steps.
+### 1. IMPLEMENT (main agent)
 
-### 1. ANALYZE
-```bash
-conda run -n openai --no-capture-output python3 analyze.py
-```
-Read `.lab/<commit>/analysis.md` and the generated plots (loss curves, val_bpb, timing).
-
-### 2. INVESTIGATE
-Dig into `metrics.jsonl` for the run. Compare loss trajectories across runs. Look for:
-- **Loss trajectory shape**: Still decreasing at the end? Plateaued? Diverging?
-- **Step timing**: Any slowdowns from architectural changes?
-- **Quantization headroom**: How close to 16MB?
-- **Where differences emerge**: At what step does this run diverge from previous?
-
-### 3. SYNTHESIZE
-**MANDATORY**: Append investigation notes to `.lab/<commit>/analysis.md` under the "Agent Investigation Notes" header. Write what you observed, how it compares to the best, what surprised you, what to try next. No notes = no memory and you'll repeat mistakes.
-
-### 4. UPDATE
-Update `.lab/insights.md` with any new validated learnings. Delete disproven hypotheses. Keep it clean and accurate.
-
-### 4.5. RE-EVALUATE: Research-driven idea reprioritization (DO NOT SKIP)
-
-**Every experiment teaches you something bigger than its result.** This step is what separates parameter sweeping from research.
-
-**A. What deeper principle did this experiment reveal?**
-
-Don't just record "WD=0.10 improved BPB." Ask *why*. Chain: Observation → Principle → Implication → New idea / Killed idea. Write this reasoning in your analysis notes.
-
-**B. Reprioritize `ideas_queue.md` based on the new principle.**
-
-For each queued idea: does the new result make it more promising (move up), less promising (move down/kill), or spawn a better version (replace)?
-
-**C. Keep the queue short and actionable** — max ~15 ideas. If an idea has sat untested for 10+ experiments, either test it now or kill it.
-
-**D. Look for idea combinations** — the most powerful experiments often combine two insights that reinforce each other.
-
-### 5. DECIDE (compare against ALL-TIME BEST in insights.md)
-
-- **val_bpb lower than best** → this is a NEW BEST. Update `results.tsv` to `keep`. Update `insights.md` current best.
-- **val_bpb equal or higher** → DISCARD. Update `results.tsv` to `discard`. Restore the best code from its archived snapshot: `cp .lab/<best_commit>/train_gpt_mlx.py ./train_gpt_mlx.py`. Git commit the revert.
-
-### 6. IMPLEMENT
 Read `insights.md` and `ideas_queue.md`. Pick the top idea. Modify `train_gpt_mlx.py`.
 
 Be a researcher:
@@ -153,46 +111,117 @@ Be a researcher:
 - Design a minimal test: change one thing at a time when possible
 - Predict the outcome before running
 
-Git commit your change with a clear description of the hypothesis.
+### 2. VALIDATE & COMMIT (main agent)
 
-### 6.5. VALIDATE (for code changes — skip for pure env-var changes)
-
+For code changes (skip for pure env-var changes):
 ```bash
 # A. Syntax check (~5s)
 conda run -n openai --no-capture-output python3 -c "import train_gpt_mlx; print('OK')"
 
-# B. Sanity check (~30s) — instantiate model, verify shapes/values
-
-# C. 5-step micro-run (~30s)
+# B. 5-step micro-run (~30s)
 RUN_ID=validate ITERATIONS=5 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 MAX_WALLCLOCK_SECONDS=60 \
   conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tail -5
 ```
 
 Loss should start ~6.93 (ln(1024)) and decrease. Red flags: NaN, Inf, loss stuck, loss >> 7.0.
 
-If a novel idea is >0.1 BPB worse than baseline at same step count, **suspect a bug first**. Never discard an idea on a crashed/NaN run — fix the bug and retry.
+**Always git commit before running.** Use a descriptive message with the experiment ID and hypothesis. `analyze.py` archives code into `.lab/<commit>/` after each run.
 
-### 7. COMMIT & RUN
-**Always git commit before running.** This ensures the run is tied to a specific code snapshot. Use a descriptive message with the experiment ID and hypothesis (e.g., `exp_025: test layer-wise LR decay`). `analyze.py` will archive `train_gpt_mlx.py` into `.lab/<commit>/` after the run, so every experiment has a reproducible code snapshot.
+### 3. RUN (main agent)
 
-Launch with the appropriate tier (smoke or medium).
+Launch with the appropriate tier (smoke or medium). Get current best env vars from `.lab/insights.md`.
 
-### 8. POST-RUN
-```bash
+### 4. POST-RUN BOOKKEEPING (mandatory subagent — DO NOT SKIP)
+
+**After every run, spawn a subagent to handle all bookkeeping.** This is the most critical step. The main agent MUST NOT proceed to the next experiment until the subagent completes and confirms all updates are done.
+
+**Spawn an Agent** with `subagent_type: "general-purpose"` and the following prompt (fill in the bracketed values):
+
+```
+You are the post-run bookkeeping agent for a parameter-golf experiment.
+
+## Your task
+Process the results of experiment [EXP_ID] and update ALL state files.
+Do NOT skip any file. You must confirm each update at the end.
+
+## Context
+- Run log: [LOG_FILE_PATH] (e.g., logs/exp_034_gradclip025.txt)
+- Current best val_bpb: [BEST_VAL_BPB] from [BEST_EXP_ID]
+- Best config env vars: [BEST_CONFIG_VARS]
+- Hypothesis: [WHAT_WAS_TESTED_AND_WHY]
+
+## Steps (do ALL of them)
+
+### A. Run analyze.py
+```
 conda run -n openai --no-capture-output python3 analyze.py
 ```
-This archives the run into `.lab/<commit>/` including: `run.log`, `train_gpt_mlx.py` (code snapshot), `analysis.md`, and plots. Every past experiment's exact code is recoverable from `.lab/<commit>/train_gpt_mlx.py`.
+Read the generated `.lab/<commit>/analysis.md`.
 
-Then update **all** state files:
-- **`.lab/results.tsv`** — append a row with the result
-- **`EXPERIMENT_LOG.md`** — append to the summary table AND write a detailed narrative
-- **`.lab/insights.md`** — update current best if applicable, add new learnings
-- **`.lab/ideas_queue.md`** — mark completed ideas, kill disproven ones, add new ideas
+### B. Extract results from run log
+Parse the log for: final val_bpb (int8), artifact size, steps completed,
+step time, and any other notable metrics.
 
-Do NOT batch these updates. Update after EVERY run before starting the next.
+### C. Decide: KEEP or DISCARD
+Compare final val_bpb against current best.
+- If LOWER → NEW BEST
+- If EQUAL or HIGHER → DISCARD
 
-### 9. REPEAT
-Go back to step 0.
+### D. Update `.lab/results.tsv`
+Append a row. Set status to `keep` or `discard`.
+
+### E. Update `EXPERIMENT_LOG.md`
+1. Add a row to the summary table with: exp number, run ID, change description,
+   steps, val_bpb, artifact size, status, and key takeaway.
+2. If this was a NEW BEST or reveals an important learning, add a detailed
+   narrative section.
+
+### F. Update `.lab/insights.md`
+- If NEW BEST: update the "Current Best" section (commit, val_bpb, artifact,
+  log path, next_exp number, and best config env vars).
+- Add any new validated learnings to the appropriate section.
+- Delete any disproven hypotheses.
+
+### G. Update `.lab/ideas_queue.md`
+- Mark the tested idea as completed (strikethrough + result).
+- Kill any ideas that this result disproves.
+- Add any new ideas spawned by this result.
+- Reprioritize: does this result make queued ideas more/less promising?
+
+### H. Research reflection (write in analysis notes)
+Append to `.lab/<commit>/analysis.md` under "Agent Investigation Notes":
+- What deeper principle did this experiment reveal?
+- Chain: Observation → Principle → Implication → New idea / Killed idea
+- How does the loss trajectory compare to previous runs?
+- What surprised you?
+
+### I. If DISCARD: restore best code
+```
+cp .lab/<best_commit>/train_gpt_mlx.py ./train_gpt_mlx.py
+```
+(Only if the best commit's code is archived. Otherwise use `git checkout <best_commit> -- train_gpt_mlx.py`.)
+
+### J. Git commit all updates
+Stage all changed files (use `git add -f` for .lab/ files) and commit with
+a message summarizing the result.
+
+### K. Confirm completion
+End your response with this exact checklist (fill in ✅ or ❌):
+- [ ] analyze.py ran
+- [ ] results.tsv updated
+- [ ] EXPERIMENT_LOG.md updated (table + narrative if needed)
+- [ ] insights.md updated
+- [ ] ideas_queue.md updated
+- [ ] analysis notes written
+- [ ] code restored (if discard)
+- [ ] git committed
+- [ ] RESULT: [KEEP/DISCARD] val_bpb=[VALUE] vs best=[BEST_VALUE]
+```
+
+**GATE: Do not start step 1 for the next experiment until the subagent returns with all items checked.**
+
+### 5. REPEAT
+Re-read `program.md` (context gets long and you forget steps), then go back to step 1.
 
 ## Important Rules
 
@@ -201,6 +230,8 @@ Go back to step 0.
 **Timeout**: Smoke tests should take <2 min, medium <15 min. Kill anything exceeding 15 min.
 
 **Crashes**: If it's a typo/import error, fix and re-run. If fundamentally broken, log as `crash` in results.tsv and move on.
+
+**Bookkeeping is mandatory**: The post-run subagent (step 4) is a hard gate. NEVER skip it. NEVER start the next experiment before the subagent confirms all files are updated. This is the #1 source of lost context and repeated mistakes.
 
 **NEVER STOP**: Once the experiment loop has begun, do NOT pause to ask "should I keep going?" The human might be asleep and expects you to continue working *indefinitely* until manually stopped. You are autonomous. If you run out of ideas, think harder — re-read your insights, look at the loss curves more carefully, try combining previous near-misses, study `train_gpt.py` for new inspiration, try more radical architectural changes. The loop runs until the human interrupts you. As an example, if each experiment takes ~15 minutes, you can run ~4/hour, ~32 over an 8-hour sleep. The human wakes up to results.
 
