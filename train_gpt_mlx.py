@@ -101,6 +101,9 @@ class Hyperparameters:
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     muon_weight_decay: float = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    # Per-layer LR scaling: deeper layers get higher LR. 0=disabled.
+    # lr_layer_i = base_lr * (1 + layer_lr_scale * i / (num_layers - 1))
+    layer_lr_scale: float = float(os.environ.get("LAYER_LR_SCALE", 0.0))
 
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
@@ -521,6 +524,15 @@ class Muon:
         self.keys = keys
         self.args = args
         self.buffers = {k: mx.zeros_like(params[k]) for k in keys}
+        # Pre-compute per-key layer LR scales (deeper layers get higher LR).
+        self.lr_scales: dict[str, float] = {}
+        if args.layer_lr_scale != 0:
+            n = max(args.num_layers - 1, 1)
+            for k in keys:
+                # Extract layer index from key like "blocks.3.attn.c_q.weight"
+                parts = k.split(".")
+                layer_idx = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                self.lr_scales[k] = 1.0 + args.layer_lr_scale * (layer_idx / n)
 
     def step(self, params: dict[str, mx.array], grads: dict[str, mx.array], step: int, lr_mul: float) -> dict[str, mx.array]:
         if self.args.muon_momentum_warmup_steps:
@@ -528,7 +540,7 @@ class Muon:
             momentum = (1.0 - t) * self.args.muon_momentum_warmup_start + t * self.args.muon_momentum
         else:
             momentum = self.args.muon_momentum
-        lr = self.args.matrix_lr * lr_mul
+        base_lr = self.args.matrix_lr * lr_mul
         # Warmdown-aware WD: increase WD as LR drops during warmdown.
         # When lr_mul=1.0 (full LR), wd=base_wd. When lr_mul→0 (warmdown end), wd→2*base_wd.
         # This counteracts the natural weakening of WD's effect as updates shrink.
@@ -545,6 +557,7 @@ class Muon:
             update = (g_ortho * scale).astype(p.dtype)
             if wd > 0:
                 update = update + wd * p
+            lr = base_lr * self.lr_scales.get(k, 1.0) if self.lr_scales else base_lr
             out[k] = p - lr * update
         return out
 
