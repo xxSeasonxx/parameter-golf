@@ -88,16 +88,25 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 **Our original contributions** (differentiators):
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
 2. Frequency-decomposed skip gating — proven, unique
-3. ~~Warmdown-phase QAT~~ — FAILED (exp_036, +0.057 BPB). Ramping QAT during warmdown kills convergence. Quant gap closes (0.0002) but BPB too bad. Variant: pre-warmdown constant-strength QAT on H100 may work.
-5. ~~SWA~~ — FAILED on Mac. Wide (exp_037, +0.127) and narrow (exp_038, +0.003). With ~700 steps, weights converge monotonically — no oscillation to average. H100-only technique.
-4. Layer-wise quantization budget allocation (NEW, to test) — data-driven per-layer precision
+3. Asymmetric MLP (encoder=2x, decoder=4x) — validated, small win
+4. Per-layer LR scaling for Muon — validated, small win
 
-**Known techniques to add** (table stakes):
-- ~~SWA~~ — KILLED for Mac (exp_037 wide +0.127, exp_038 narrow +0.003). H100-only (needs 1500+ steps for oscillation).
-- Int6 quantization (MLP/attention weights)
+**Known techniques to add on H100** (table stakes):
+- Int6 quantization (MLP/attention weights) — biggest expected gain
 - TTT LoRA at eval time (already in codebase)
+- SWA (H100-only, needs 1500+ steps)
 - Zstd-22 compression (replace zlib)
+- 11 layers (free on H100)
 
-**Priority order for Mac testing** (validate mechanisms before H100):
-1. Warmdown QAT mechanism (int8 on Mac, int6 on H100)
-2. Depth-recurrent warmdown (high risk, start gentle)
+**Killed for Mac, may work on H100**:
+- QAT during warmdown — quant gap closes but BPB suffers at 700 steps
+- SWA — needs oscillation that only occurs at 1500+ steps
+- Pre-warmdown constant-strength QAT — untested
+
+## Apple Silicon Plateau Analysis
+
+After 13 experiments at the current config level (exp_035-047), Apple Silicon val_bpb is firmly plateaued at **~1.630 ± 0.003**. Pre-quant values consistently land in 1.628-1.634. The noise band is larger than any remaining optimization opportunity.
+
+**Root cause**: ~700 steps with ~17M tokens is the fundamental bottleneck. No per-step optimization can overcome the data limitation. The leaderboard top (1.1194) uses 64x more data per step.
+
+**What to do next**: Port to 8xH100 and focus on techniques that scale with data (int6, TTT, SWA, 11L).
