@@ -52,7 +52,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Never run concurrent**: 2-3x throughput degradation.
 - **Hyperparameter sweeps at batch=8192 are NOT representative**: RoPE and QK gain tuning showed no gains. Focus on batch scaling and architectural ideas.
 - **DropHead hurts**: p=0.1 (+0.008 BPB) and p=0.05 (+0.006 BPB). Stochastic head masking adds gradient noise that isn't compensated by regularization benefit when WD is already strong.
-- **Gradient clipping is a major lever**: clip=1.0 gives -0.006, clip=0.5 gives -0.016 BPB total. Stabilizes early training (loss spikes to 17.9 without clipping). The response curve: no_clip→1.6492, clip=1.0→1.6434, clip=0.5→1.6334. Stronger clipping is better (so far).
+- **Gradient clipping is a major lever**: clip=0.5 is optimal. Response: no_clip→1.6492, clip=1.0→1.6434, clip=0.5→1.6334, clip=0.25→1.6362. Clip=0.25 too aggressive (clips useful gradients). Clip=0.5 is the sweet spot.
 - **Batch=16k with MLP3x is too small**: val_bpb=1.6692 despite 937 steps. Gradient quality dominates.
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.

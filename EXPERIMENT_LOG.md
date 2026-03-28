@@ -46,6 +46,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 031 | exp_031_mlp3x_batch16k | MLP3x + batch=16384 | 937/2000 | 1.6692 | 13.3MB | Discard | Gradient quality too poor despite more steps |
 | **032** | **exp_032_gradclip** | **MLP3x + GRAD_CLIP=1.0** | **702/2000** | **1.6434** | **13.0MB** | **Superseded** | **-0.006 BPB. Stabilizes early training spikes** |
 | **033** | **exp_033_gradclip05** | **MLP3x + GRAD_CLIP=0.5** | **698/2000** | **1.6334** | **13.0MB** | **BEST** | **-0.016 BPB total. Stronger clip is better** |
+| 034 | exp_034_gradclip025 | MLP3x + GRAD_CLIP=0.25 | 690/2000 | 1.6362 | 13.0MB | Discard | Too aggressive: +0.003 vs clip=0.5. Clips useful gradients |
 
 ---
 
