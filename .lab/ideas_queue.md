@@ -166,3 +166,4 @@ Prioritized by expected impact. Organized by research direction, not just parame
 - **Extreme asymmetric MLP (1,5)**: exp_042 +0.001 BPB vs (2,4). Encoder MLP=1x starves feature extraction. 2,4 is the sweet spot for U-Net skip architecture.
 - **FREQ_SKIP_WINDOW=16**: exp_044 +0.0007 BPB vs W=32 (within noise). Frequency decomposition is robust to window size. Not worth tuning.
 - **NUM_KV_HEADS=2 (aggressive GQA)**: exp_045 +0.003 BPB AND worse compression (3.64x vs 3.85x, 14.0MB vs 13.1MB despite fewer params). Fewer KV heads produce less regular weight patterns. Speed gain (830ms vs 848ms) doesn't compensate. 4 KV heads is optimal for 8Q heads.
+- **LOGIT_SOFTCAP=15.0 (tighter clamping)**: exp_047 +0.006 BPB. Constrains model's ability to make confident predictions for common tokens. Default LOGIT_SOFTCAP=30.0 is well-calibrated. Softcap affects prediction confidence, not weight magnitude or compressibility.

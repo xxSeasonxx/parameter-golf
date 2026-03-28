@@ -59,6 +59,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 044 | exp_044_fsw16 | FREQ_SKIP_WINDOW=16 (smaller window) | 701/2000 | 1.6318 | 13.1MB | Discard | +0.0007 vs best. Window size doesn't matter. W=32 is fine |
 | 045 | exp_045_kv2 | NUM_KV_HEADS=2 (aggressive GQA) | 723/2000 | 1.6345 | 14.0MB | Discard | +0.003 vs best. Fewer KV heads hurts BPB and compression |
 | **046** | **exp_046_warmup50** | **WARMUP_STEPS=50 (up from 20)** | **706/2000** | **1.6309** | **13.1MB** | **BEST** | **-0.0002 BPB. Marginal new best. Longer warmup stabilizes early training** |
+| 047 | exp_047_softcap15 | LOGIT_SOFTCAP=15.0 (down from 30.0) | 709/2000 | 1.6364 | 13.2MB | Discard | +0.006 BPB. Tighter clamping hurts confident predictions. Default 30.0 is optimal |
 
 ---
 
@@ -616,6 +617,31 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Pre-quant BPB of 1.6284 suggests the model capacity is well-utilized. The quant gap (~0.0025) remains the main source of loss.
 
 **Decision**: **KEEP** as marginal new best. Zero downside, both metrics are best-ever.
+
+---
+
+### Experiment 047: LOGIT_SOFTCAP=15.0 — Tighter Logit Clamping (Discard)
+
+**Hypothesis**: Reducing logit softcap from 30.0 to 15.0 constrains logit magnitudes more aggressively, potentially acting as a regularizer. Tighter clamping prevents over-confident predictions, which could improve generalization.
+
+**Config**: Pure env-var change: `LOGIT_SOFTCAP=15.0`. All else identical to exp_046 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6340** at step 709 — worse than best pre-quant (1.6284 from exp_046).
+- Int8 val_bpb=**1.6364** — **+0.006 BPB worse** than best (1.6309).
+- 709 steps at 847ms/step. Artifact: 13,188,283 bytes (~13.2MB, 3.85x compression).
+
+**Analysis**:
+- The softcap=30.0 default is already well-calibrated. Reducing to 15.0 constrains the model's ability to make confident predictions for common, predictable tokens (articles, prepositions, closing brackets, etc.). These tokens are "easy" and the model should be allowed high confidence on them.
+- The regression is consistent across both pre-quant (+0.006 vs best pre-quant) and post-quant (+0.006 vs best), indicating the damage is in the model quality itself, not quantization interaction.
+- Compression ratio (3.85x) is identical to exp_046, confirming the softcap doesn't affect weight distribution.
+
+**Learnings**:
+- LOGIT_SOFTCAP=30.0 is well-calibrated for this architecture. Don't reduce it.
+- Softcap acts as a regularizer on prediction confidence, not weight magnitude. Unlike WD (which improves compressibility), softcap changes only affect the logit distribution at inference time.
+- The model genuinely benefits from being able to make confident predictions. Common tokens have near-deterministic distributions that require large logit magnitudes to represent accurately.
+
+**Decision**: **DISCARD**. Keep LOGIT_SOFTCAP=30.0 (default).
 
 ---
 

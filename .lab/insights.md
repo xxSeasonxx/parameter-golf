@@ -9,7 +9,7 @@ commit: 966ddeb
 val_bpb: 1.6309 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50)
 artifact: 13,065,155 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_046_warmup50.txt
-next_exp: 047
+next_exp: 048
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -28,6 +28,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Asymmetric MLP (2x encoder, 4x decoder) > uniform MLP3x**: -0.001 BPB. Same 24.1M params, slightly faster (848ms vs 855ms), slightly smaller artifact (13.1MB vs 13.2MB). Decoder layers need more MLP capacity for token prediction. Free architectural win.
 - **Asymmetric MLP limits**: Extreme asymmetry (1,5) is worse (+0.001 BPB vs 2,4). Encoder MLP=1x starves feature extraction. 2,4 is the sweet spot — encoder needs enough capacity for good intermediate representations fed via U-Net skip connections.
 - **4 KV heads is optimal for 8Q heads**: NUM_KV_HEADS=2 (exp_045) is worse on both BPB (+0.003) and compression (3.64x vs 3.85x, 14.0MB vs 13.1MB despite fewer params). Fewer KV heads produce less regular weight patterns → worse zlib. The speed gain (830ms vs 848ms, +15 steps) doesn't compensate. Don't reduce KV heads below 4.
+- **LOGIT_SOFTCAP=30.0 is optimal**: exp_047 softcap=15.0 is worse (+0.006 BPB). Tighter clamping constrains confident predictions for common tokens. Softcap regulates prediction confidence, not weight magnitude — doesn't affect compressibility. Don't touch.
 
 ## Optimization
 
