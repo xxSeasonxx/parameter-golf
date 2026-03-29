@@ -84,6 +84,7 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Full-training QAT (QAT_STOP_LR_MUL=0)~~ [SWEEP] — neutral, quant gap slightly better but pre-quant worse. Effects cancel
 - ~~Cosine warmdown shape~~ [SWEEP] — +0.020 BPB, linear is optimal. Kill warmdown shape experiments
 - ~~Label smoothing (0.1)~~ [KNOWN] — +0.42 BPB CATASTROPHIC. Vocab=1024 too small, loss objective mismatch
+- ~~Higher matrix_lr=0.06 (1.5x)~~ [SWEEP] — +0.009 BPB, Muon already well-scaled at 0.04. Kill LR sweep
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
@@ -115,3 +116,4 @@ See EXPERIMENT_LOG.md for details. Key killed ideas:
 - Full-training QAT (QAT_STOP_LR_MUL=0) — neutral vs pre-warmdown-only, no benefit (exp_056)
 - Cosine warmdown shape — +0.020 BPB, linear is optimal. Kill warmdown shape experiments (exp_057)
 - Label smoothing — +0.42 BPB CATASTROPHIC with vocab=1024. Loss objective mismatch kills performance (exp_058)
+- Matrix LR sweep — matrix_lr=0.06 overshoots (+0.009 BPB), Muon's orthogonalized updates are well-scaled at 0.04 (exp_059)

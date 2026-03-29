@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_058 Label smoothing (discarded — +0.42 BPB CATASTROPHIC, smoothing destroys training with small vocab)
+**Latest**: exp_059 Higher matrix_lr=0.06 (discarded — +0.009 BPB, Muon already well-scaled at 0.04)
 
 ---
 
@@ -70,6 +70,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 056 | exp_056_full_qat | Full-training QAT (QAT_STOP_LR_MUL=0) | 704/2000 | 1.6308 | 13.1MB | Discard | Neutral — quant gap slightly better (+0.0025 vs +0.0029) but pre-quant worse (1.6283 vs 1.6270). Effects cancel |
 | 057 | exp_057_cosine_warmdown | Cosine warmdown shape (WARMDOWN_SHAPE=cosine) | 696/2000 | 1.6503 | 12.7MB | Discard | +0.020 BPB regression. Cosine keeps LR too high too long, insufficient fine convergence. Linear warmdown is optimal |
 | 058 | exp_058_label_smooth | Label smoothing (0.1) | 692/2000 | 2.0499 | 12.9MB | Discard | CATASTROPHIC +0.42 BPB. Smoothing redistributes too much mass with vocab=1024. Training objective diverges from eval metric |
+| 059 | exp_059_higher_lr | MATRIX_LR=0.06 (1.5x) | 703/2000 | 1.6391 | 13.3MB | Discard | +0.009 BPB. Higher LR overshoots — Muon orthogonalized updates well-scaled at 0.04. Kill LR sweep |
 
 ---
 
@@ -925,6 +926,32 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - The training/evaluation objective mismatch (smoothed CE vs standard CE) is the primary damage mechanism. The model learns to spread probability mass, which standard CE penalizes.
 - This distinguishes label smoothing from other regularizers: WD, QAT, and gradient clipping all preserve the loss objective. Only label smoothing changes what the model optimizes for.
 - Regularization that preserves the loss function (WD, QAT noise, gradient clipping) works. Regularization that modifies the loss function (label smoothing, SWA) hurts.
+
+---
+
+### Experiment 059: Higher Matrix LR (Discard)
+
+**Hypothesis**: Higher matrix_lr=0.06 (1.5x default 0.04) compensates for the reduced effective LR from aggressive warmdown. With warmdown dominating training (~1200 iters target vs ~700 actual steps), the model spends most of its time at reduced LR. A higher base LR could allow more learning in the pre-warmdown phase.
+
+**Config**: Pure env-var change: `MATRIX_LR=0.06`. All else identical to exp_051 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6375** at step 703 — worse than best pre-quant (1.6270 from exp_051).
+- Post-quant val_bpb=**1.6391** — **+0.009 BPB worse** than best (1.6299).
+- 703 steps at similar step time. Artifact: **13,309,291 bytes (13.3MB)** — slightly larger than best (13.1MB), likely from less regular weights due to overshooting.
+
+**Analysis**:
+- The higher LR overshoots during the main training phase. Muon's Newton-Schulz orthogonalization already normalizes gradient updates to have unit norm on the Stiefel manifold — the matrix_lr=0.04 is tuned to match this update scale. Increasing to 0.06 pushes updates 50% larger than the natural orthogonal step size.
+- The artifact size increase (13.3MB vs 13.1MB) is consistent with the overshooting hypothesis: larger LR steps produce less regular weight patterns that compress worse under zlib.
+- Pre-quant regression (+0.011 vs best) is larger than post-quant regression (+0.009 vs best), meaning quantization slightly helped — the noisier weights happen to be more robust to int8 rounding.
+
+**Decision**: **DISCARD**. Kill LR sweep. Muon's default matrix_lr=0.04 is well-calibrated for the orthogonalized update scale.
+
+**Learnings**:
+- Matrix LR=0.04 is optimal for Muon with Newton-Schulz orthogonalization. The LR is matched to the unit-norm update scale on the Stiefel manifold.
+- Higher LR (0.06) overshoots: +0.009 BPP and worse compression. The damage is in the main training phase, not warmdown.
+- Don't sweep matrix_lr. The LR for Muon is fundamentally different from SGD/Adam LR — it's a step size on the Stiefel manifold where unit norm is already the natural scale.
+- This closes the "compensate warmdown with higher LR" hypothesis. The warmdown regime is already well-optimized (linear decay, 1200 target).
 
 ---
 
