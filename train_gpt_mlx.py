@@ -134,16 +134,22 @@ class Hyperparameters:
     def microbatch_tokens(self) -> int:
         return self.train_batch_tokens // self.grad_accum_steps
 
+    warmdown_shape: str = os.environ.get("WARMDOWN_SHAPE", "linear")  # linear or cosine
+
     def lr_mul(self, step: int, elapsed_ms: float) -> float:
         if self.warmdown_iters <= 0:
             return 1.0
         if self.max_wallclock_seconds <= 0:
             warmdown_start = max(self.iterations - self.warmdown_iters, 0)
-            return max((self.iterations - step) / max(self.warmdown_iters, 1), 0.0) if warmdown_start <= step < self.iterations else 1.0
-        step_ms = elapsed_ms / max(step, 1)
-        warmdown_ms = self.warmdown_iters * step_ms
-        remaining_ms = max(1000.0 * self.max_wallclock_seconds - elapsed_ms, 0.0)
-        return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
+            t = max((self.iterations - step) / max(self.warmdown_iters, 1), 0.0) if warmdown_start <= step < self.iterations else 1.0
+        else:
+            step_ms = elapsed_ms / max(step, 1)
+            warmdown_ms = self.warmdown_iters * step_ms
+            remaining_ms = max(1000.0 * self.max_wallclock_seconds - elapsed_ms, 0.0)
+            t = remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
+        if self.warmdown_shape == "cosine" and t < 1.0:
+            t = 0.5 * (1.0 + math.cos(math.pi * (1.0 - t)))
+        return t
 
 
 CONTROL_TENSOR_NAME_PATTERNS = tuple(
