@@ -108,6 +108,13 @@ class Hyperparameters:
     # lr_layer_i = base_lr * (1 + layer_lr_scale * i / (num_layers - 1))
     layer_lr_scale: float = float(os.environ.get("LAYER_LR_SCALE", 0.0))
 
+    # QAT: quantization-aware training. Nudges weights toward their quantized form.
+    # Only active during pre-warmdown (lr_mul >= qat_stop_lr_mul).
+    qat_prewarmdown: bool = bool(int(os.environ.get("QAT_PREWARMDOWN", "0")))
+    qat_strength: float = float(os.environ.get("QAT_STRENGTH", 0.1))
+    qat_stop_lr_mul: float = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
+    qat_every: int = int(os.environ.get("QAT_EVERY", 10))
+
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
     # stride=64 matches the competition's best evaluation strategy.
@@ -648,6 +655,8 @@ MX_DTYPE_FROM_NAME = {
     "bfloat16": mx.bfloat16,
 }
 
+QUANT_BITS = int(os.environ.get("QUANT_BITS", 8))
+QUANT_MAX_VAL = {6: 31, 8: 127}[QUANT_BITS]  # 2^(bits-1) - 1
 INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
 # Tensors matching these patterns are kept as FP16 regardless of size (not int8 quantized).
 # Use for critical tensors like tied embeddings where quantization error hurts disproportionately.
@@ -658,6 +667,22 @@ INT8_KEEP_FLOAT_STORE_DTYPE = np.float16
 INT8_PER_ROW_SCALE_DTYPE = np.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+
+
+def sim_quant_roundtrip(w: mx.array) -> mx.array:
+    """Simulate int8 quantize→dequantize roundtrip in MLX ops (stays on GPU).
+    Per-row for 2D, per-tensor for 1D. Mirrors the actual int8 quantization path."""
+    f = w.astype(mx.float32)
+    qmax = float(QUANT_MAX_VAL)
+    if f.ndim == 2:
+        row_max = mx.maximum(mx.max(mx.abs(f), axis=1, keepdims=True), 1.0 / qmax)
+        scale = row_max / qmax
+        q = mx.clip(mx.round(f / scale), -qmax, qmax)
+        return (q * scale).astype(w.dtype)
+    amax = mx.maximum(mx.max(mx.abs(f)), mx.array(1.0 / qmax))
+    scale = amax / qmax
+    q = mx.clip(mx.round(f / scale), -qmax, qmax)
+    return (q * scale).astype(w.dtype)
 
 
 def _np_float32(arr: mx.array) -> np.ndarray:
@@ -682,14 +707,14 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
         # ranges much better than a single tensor-wide scale.
         clip_abs = np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1) if f32.size else np.empty((f32.shape[0],), dtype=np.float32)
         clipped = np.clip(f32, -clip_abs[:, None], clip_abs[:, None])
-        scale = np.maximum(clip_abs / 127.0, 1.0 / 127.0).astype(np.float32, copy=False)
-        q = np.clip(np.round(clipped / scale[:, None]), -127, 127).astype(np.int8, copy=False)
+        scale = np.maximum(clip_abs / QUANT_MAX_VAL, 1.0 / QUANT_MAX_VAL).astype(np.float32, copy=False)
+        q = np.clip(np.round(clipped / scale[:, None]), -QUANT_MAX_VAL, QUANT_MAX_VAL).astype(np.int8, copy=False)
         return np.ascontiguousarray(q), np.ascontiguousarray(scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False))
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(np.quantile(np.abs(f32).reshape(-1), INT8_CLIP_Q)) if f32.size else 0.0
     scale = np.array(clip_abs / 127.0 if clip_abs > 0.0 else 1.0, dtype=np.float32)
-    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
+    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -QUANT_MAX_VAL, QUANT_MAX_VAL).astype(np.int8, copy=False)
     return np.ascontiguousarray(q), scale
 
 
@@ -740,7 +765,7 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
         dtypes[name] = str(arr.dtype).split(".")[-1]
         stats["int8_payload_bytes"] += int(q.nbytes + s.nbytes)
     obj: dict[str, object] = {
-        "__quant_format__": "int8_clean_per_row_v1",
+        "__quant_format__": f"int{QUANT_BITS}_clean_per_row_v1",
         "quantized": quantized,
         "scales": scales,
         "dtypes": dtypes,
@@ -1280,6 +1305,21 @@ def main() -> None:
         grads = clip_grad_tree(grads, args.grad_clip_norm)
         train_loss_value = float(train_loss.item())  # .item() triggers mx.eval() for this scalar
         opt.step(model, grads, step=step, lr_mul=lr_mul)
+
+        # QAT: nudge weights toward their quantized form during pre-warmdown.
+        if args.qat_prewarmdown and lr_mul >= args.qat_stop_lr_mul and step % args.qat_every == 0:
+            flat = {k: v for k, v in tree_flatten(model.state)}
+            qat_updates = {}
+            for name, w in flat.items():
+                if not mx.issubdtype(w.dtype, mx.floating) or w.size <= INT8_KEEP_FLOAT_MAX_NUMEL:
+                    continue
+                if INT8_KEEP_FLOAT_FP16_NAME_PATTERNS and any(p in name for p in INT8_KEEP_FLOAT_FP16_NAME_PATTERNS):
+                    continue
+                w_q = sim_quant_roundtrip(w)
+                qat_updates[name] = w + args.qat_strength * (w_q - w)
+            if qat_updates:
+                model.update(tree_unflatten(list(qat_updates.items())))
+
         # mx.synchronize() is the timing fence — everything above is lazy/async. This blocks
         # until all Metal GPU work finishes, giving accurate wall-clock step timing.
         mx.synchronize()
