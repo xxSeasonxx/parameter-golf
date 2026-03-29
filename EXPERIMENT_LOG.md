@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_052 Int6 QAT (discarded, +0.061 quant gap)
+**Latest**: exp_054 Strong QAT (discarded, identical to exp_051 — QAT regularization saturated)
 
 ---
 
@@ -64,6 +64,8 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 049 | exp_049_int6 | Int6 per-row quantization (QUANT_BITS=6) | 686/2000 | 1.6975 | 6.8MB | Discard | +0.064 BPB quant gap (pre-quant 1.6332 normal). 48% artifact reduction. Needs QAT |
 | **051** | **exp_051_qat_prewarmdown** | **Pre-warmdown QAT (strength=0.1, every 10, lr_mul>=0.8)** | **710/2000** | **1.6299** | **13.1MB** | **BEST** | **NEW BEST -0.0010. QAT as regularization: pre-quant 1.6270 (best ever)** |
 | 052 | exp_052_int6_qat | Int6 QAT (QAT_BITS=6, strength=0.1, every=10) + QUANT_BITS=6 | 712/2000 | 1.6894 | 6.9MB | Discard | +0.061 quant gap barely improved from +0.064. Pre-quant 1.6281 best ever (int6 noise as regularizer) |
+| 053 | exp_053_depth_recur | Depth-recurrent warmdown (alpha=0.1, layers 2,3,4) | 711/2000 | 1.6378 | 12.9MB | Discard | +0.008 BPB, -0.2MB. Warmdown too sensitive for auxiliary losses |
+| 054 | exp_054_strong_qat | Strong QAT (strength=0.2, every=5, 4x signal) | 712/2000 | 1.6299 | 13.1MB | Discard | Identical to exp_051. QAT regularization saturated — don't tune further |
 
 ---
 
@@ -772,6 +774,33 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Even gentle auxiliary losses during warmdown interfere with convergence. The warmdown phase must remain clean.
 - Pattern confirmed: warmdown-phase interventions (SWA, QAT, depth recurrence) all hurt on Apple Silicon. Only pre-warmdown interventions work.
 - Kill exp_054 (stronger depth recurrence, alpha=0.5) — if gentle already hurts, stronger will be worse.
+
+---
+
+### Experiment 054: Strong QAT (Discard)
+
+**Hypothesis**: Stronger int8 QAT (strength=0.2, every=5 steps, 4x total signal vs exp_051's strength=0.1/every=10) provides more regularization, further improving pre-quant BPB or reducing quant gap.
+
+**Config**: Pure env-var change: `QAT_STRENGTH=0.2 QAT_EVERY=5`. All else identical to exp_051 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6272** at step 712 — essentially identical to exp_051's 1.6270.
+- Int8 val_bpb=**1.6299** — identical to exp_051's 1.6299.
+- 712 steps at ~843ms/step. Artifact: 13,105,555 bytes (~13.1MB).
+- Quant gap: +0.0027 (marginally better than exp_051's +0.0029 — within noise).
+
+**Analysis**:
+- 4x more QAT signal (2x strength * 2x frequency) produces identical results. The regularization effect of int8 QAT noise is already saturated at strength=0.1/every=10.
+- This is a binary threshold effect, not a gradient: either you have QAT noise or you don't. The exact strength/frequency doesn't matter once you're above the threshold.
+- This makes intuitive sense: int8 quantization noise is very small (255 levels, ~0.4% error per weight). Even light exposure to this noise pattern is enough for the model to develop robustness. More exposure adds no new information.
+- Contrast with int6 QAT (exp_052) where strength=0.1/every=10 was clearly insufficient for the much larger int6 noise. Int6 has ~4x larger per-weight error, so the threshold for saturation is much higher.
+
+**Decision**: **DISCARD**. Keep the simpler config (strength=0.1, every=10). QAT hyperparameters are not worth tuning for int8.
+
+**Learnings**:
+- QAT regularization saturates quickly for int8. 4x more signal produces identical BPB. It's a binary threshold, not a gradient.
+- Don't tune QAT hyperparameters further for int8. Strength=0.1, every=10 is sufficient.
+- This distinguishes int8 QAT from int6 QAT: int8 noise is small enough that any reasonable amount saturates the benefit. Int6 noise is large enough that the saturation threshold is much higher (exp_052 was clearly below it).
 
 ---
 

@@ -47,8 +47,8 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 ### ~~Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]~~ COMPLETED — DISCARD
 **Result**: val_bpb=1.6378 (+0.008 BPB), artifact 12.9MB (-0.2MB). Even gentle alpha=0.1 during warmdown hurts convergence. Negligible compression benefit. Warmdown phase is sacred — no auxiliary losses allowed.
 
-### ~~Experiment 054: Depth Recurrence (Stronger) [ORIGINAL]~~ KILLED
-**Reason**: exp_053 (gentle, alpha=0.1) already hurts +0.008 BPB. Stronger alpha would be worse. Depth recurrence during warmdown is a dead end.
+### ~~Experiment 054: Strong Int8 QAT [SWEEP]~~ COMPLETED — DISCARD
+**Result**: val_bpb=1.6299 (identical to exp_051). 4x stronger QAT (strength=0.2, every=5) produces identical results. QAT regularization saturates — it's a binary threshold, not a gradient. Don't tune QAT hyperparameters for int8. Pure env-var sweep, no code change.
 
 ---
 
@@ -70,6 +70,7 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Int6 quantization (QUANT_BITS=6)~~ [KNOWN] — +0.064 BPB quant gap, needs QAT
 - ~~Int6 QAT (strength=0.1, every=10)~~ [OUR TWIST] — +0.061 quant gap, too gentle. Pre-quant 1.6281 best ever
 - ~~Depth-recurrent warmdown (alpha=0.1)~~ [**ORIGINAL**] — +0.008 BPB, -0.2MB. KILLED (warmdown is sacred)
+- ~~Strong int8 QAT (strength=0.2, every=5)~~ [SWEEP] — identical to exp_051. QAT saturated. Pure env-var sweep
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
