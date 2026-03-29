@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_057 Cosine warmdown shape (discarded — +0.020 BPB, linear warmdown is optimal)
+**Latest**: exp_058 Label smoothing (discarded — +0.42 BPB CATASTROPHIC, smoothing destroys training with small vocab)
 
 ---
 
@@ -69,6 +69,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 055 | exp_055_strong_int6_qat | Strong int6 QAT (strength=0.3, every=5, QAT_BITS=6) | 713/2000 | 1.6904 | 6.9MB | Discard | +0.063 quant gap — int6 QAT killed (3 exps confirm gap is ~+0.063 regardless of QAT) |
 | 056 | exp_056_full_qat | Full-training QAT (QAT_STOP_LR_MUL=0) | 704/2000 | 1.6308 | 13.1MB | Discard | Neutral — quant gap slightly better (+0.0025 vs +0.0029) but pre-quant worse (1.6283 vs 1.6270). Effects cancel |
 | 057 | exp_057_cosine_warmdown | Cosine warmdown shape (WARMDOWN_SHAPE=cosine) | 696/2000 | 1.6503 | 12.7MB | Discard | +0.020 BPB regression. Cosine keeps LR too high too long, insufficient fine convergence. Linear warmdown is optimal |
+| 058 | exp_058_label_smooth | Label smoothing (0.1) | 692/2000 | 2.0499 | 12.9MB | Discard | CATASTROPHIC +0.42 BPB. Smoothing redistributes too much mass with vocab=1024. Training objective diverges from eval metric |
 
 ---
 
@@ -895,6 +896,35 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - Cosine warmdown shape is clearly worse (+0.020 BPB). Linear warmdown is optimal.
 - The steady LR decay of linear warmdown allows fine convergence that cosine's rapid end-drop cannot match.
 - With only ~700 steps and warmdown dominating training, the shape of the decay curve matters — linear gives the most even distribution of convergence effort across the warmdown phase.
+
+---
+
+### Experiment 058: Label Smoothing (Discard — CATASTROPHIC)
+
+**Hypothesis**: Label smoothing (0.1) acts as regularization for limited data, preventing overconfident predictions and potentially improving generalization on the small training set.
+
+**Config**: Best config + `LABEL_SMOOTHING=0.1`. Code change: modify cross-entropy loss to use smoothed targets instead of hard labels.
+
+**What happened**:
+- Pre-quant val_bpb=**2.0475** at step 692 — **+0.42 BPB worse** than best (1.6299). CATASTROPHIC regression.
+- Post-quant val_bpb=**2.0499**. Quant gap: +0.0024 (normal).
+- 692 steps at ~867ms/step. Artifact: 12,944,370 bytes (12.9MB).
+- Training loss was massively elevated throughout: step 200 loss=3.95 (vs typical ~2.8), step 400 loss=3.68 (vs typical ~2.5). The model never converged to normal loss levels.
+- val_bpb at step 500 was 2.1406 — already catastrophic at the midpoint.
+
+**Root cause analysis**:
+- With vocab=1024, label smoothing=0.1 redistributes 10% of probability mass across 1023 non-target tokens. Each non-target token gets ~0.0001 probability mass. This seems small, but the training objective (smoothed CE) now encourages the model to assign non-trivial probability to ALL tokens at every position.
+- The evaluation metric is standard CE (hard labels). The model optimized for smoothed CE learns to spread probability mass, which is penalized by standard CE. The training objective directly conflicts with the evaluation metric.
+- With large vocabularies (32K-100K), the per-token smoothing mass is negligible (~1e-6). With vocab=1024, it's 100x larger per token, making the objective mismatch much worse.
+- Compare with pre-warmdown QAT (exp_051, -0.001 BPB): QAT adds noise to weights but doesn't change the loss objective. Label smoothing fundamentally changes what the model is optimizing for.
+
+**Decision**: **DISCARD**. Kill label smoothing entirely.
+
+**Learnings**:
+- Label smoothing is CATASTROPHIC with small vocabularies. Vocab=1024 means each non-target token gets ~0.0001 smoothing mass — 100x more than with vocab=100K.
+- The training/evaluation objective mismatch (smoothed CE vs standard CE) is the primary damage mechanism. The model learns to spread probability mass, which standard CE penalizes.
+- This distinguishes label smoothing from other regularizers: WD, QAT, and gradient clipping all preserve the loss objective. Only label smoothing changes what the model optimizes for.
+- Regularization that preserves the loss function (WD, QAT noise, gradient clipping) works. Regularization that modifies the loss function (label smoothing, SWA) hurts.
 
 ---
 

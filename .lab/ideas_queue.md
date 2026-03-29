@@ -69,9 +69,8 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 ### ~~Experiment 057: Cosine Warmdown Shape [SWEEP]~~ COMPLETED — DISCARD
 **Result**: val_bpb=1.6503 (+0.020 BPB). Cosine keeps LR too high too long, insufficient fine convergence. Linear warmdown is optimal. Kill warmdown shape experiments.
 
-### Experiment 058: Accept Int6 is H100-Only [STRATEGY]
-**What**: Skip int6 gap closure on Mac entirely. On H100 with 1500+ steps, the model may naturally find quantization-friendly basins, or the gap may be acceptable given the massive artifact savings (6.9MB vs 13.1MB = room for 12+ layers).
-**Motivation**: Three failed int6 QAT attempts suggest Mac's ~700 steps is insufficient. H100's 2-3x more steps + potential SWA may close the gap naturally.
+### ~~Experiment 058: Label Smoothing (0.1) [KNOWN]~~ COMPLETED — DISCARD (CATASTROPHIC)
+**Result**: val_bpb=2.0499 (+0.42 BPB, catastrophic). With vocab=1024, smoothing redistributes too much mass per non-target token. Training objective (smoothed CE) diverges from eval metric (standard CE). Label smoothing is KILLED for small vocab.
 
 ---
 
@@ -84,6 +83,7 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Strong int6 QAT (strength=0.3, every=5)~~ [OUR TWIST] — +0.063 gap, KILLED. 3 exps confirm int6 gap impervious to QAT
 - ~~Full-training QAT (QAT_STOP_LR_MUL=0)~~ [SWEEP] — neutral, quant gap slightly better but pre-quant worse. Effects cancel
 - ~~Cosine warmdown shape~~ [SWEEP] — +0.020 BPB, linear is optimal. Kill warmdown shape experiments
+- ~~Label smoothing (0.1)~~ [KNOWN] — +0.42 BPB CATASTROPHIC. Vocab=1024 too small, loss objective mismatch
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
@@ -114,3 +114,4 @@ See EXPERIMENT_LOG.md for details. Key killed ideas:
 - Int6 pre-warmdown QAT at any strength — 3 experiments confirm gap is ~+0.063 regardless (exp_049/052/055)
 - Full-training QAT (QAT_STOP_LR_MUL=0) — neutral vs pre-warmdown-only, no benefit (exp_056)
 - Cosine warmdown shape — +0.020 BPB, linear is optimal. Kill warmdown shape experiments (exp_057)
+- Label smoothing — +0.42 BPB CATASTROPHIC with vocab=1024. Loss objective mismatch kills performance (exp_058)

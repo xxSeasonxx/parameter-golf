@@ -85,7 +85,6 @@ class Hyperparameters:
     tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
-    label_smoothing: float = float(os.environ.get("LABEL_SMOOTHING", 0.0))
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
@@ -432,13 +431,12 @@ class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
                  qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
-                 mlp_mult_asymmetric: str = "", label_smoothing: float = 0.0):
+                 mlp_mult_asymmetric: str = ""):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
-        self.label_smoothing = label_smoothing
 
         self.tok_emb = nn.Embedding(vocab_size, dim)
         self.num_encoder_layers = num_layers // 2
@@ -512,7 +510,7 @@ class GPT(nn.Module):
         if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
             logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
-            return nn.losses.cross_entropy(logits.astype(mx.float32), y, label_smoothing=self.label_smoothing, reduction="mean")
+            return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
 
         loss_sum = mx.array(0.0, dtype=mx.float32)
         n = int(x.shape[0])
@@ -520,7 +518,7 @@ class GPT(nn.Module):
             e = min(s + self.logit_chunk_tokens, n)
             logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
-            loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], label_smoothing=self.label_smoothing, reduction="sum")
+            loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
         return loss_sum / float(n)
 
     def loss_per_token(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
@@ -1142,7 +1140,6 @@ def main() -> None:
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
-        label_smoothing=args.label_smoothing,
     )
     opt = SplitOptimizers(model, args)
 

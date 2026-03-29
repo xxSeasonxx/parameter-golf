@@ -39,3 +39,4 @@ f0fdd78	1.6364	13188283	discard	exp_047: LOGIT_SOFTCAP=15.0 — +0.006 BPB worse
 a040c35	1.6904	6938640	discard	exp_055: Strong int6 QAT (QAT_BITS=6, strength=0.3, every=5) — +0.063 quant gap, int6 QAT killed. Pre-quant 1.6271
 30da62b	1.6308	13085184	discard	exp_056: Full-training QAT (QAT_STOP_LR_MUL=0) — neutral, quant gap slightly better (+0.0025 vs +0.0029) but pre-quant worse (1.6283 vs 1.6270). Effects cancel
 73ad98a	1.6503	12749219	discard	exp_057: Cosine warmdown shape (WARMDOWN_SHAPE=cosine) — +0.020 BPB regression. Linear warmdown is optimal
+2cd8dba	2.0499	12944370	discard	exp_058: Label smoothing (0.1) — CATASTROPHIC +0.42 BPB. Smoothing redistributes too much mass with vocab=1024, training objective diverges from eval metric
