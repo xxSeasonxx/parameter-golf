@@ -66,11 +66,8 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 ### ~~Experiment 056: Full-Training QAT (QAT_STOP_LR_MUL=0) [SWEEP]~~ COMPLETED — DISCARD
 **Result**: val_bpb=1.6308 (+0.0009 vs best). Pre-quant 1.6283 (slightly worse than 1.6270). Quant gap +0.0025 (slightly better than +0.0029). Effects cancel. Full-training QAT is neutral — weight perturbations during warmdown are tolerated (unlike loss-modifying interventions) but don't help. Keep pre-warmdown-only config.
 
-### Experiment 057: STE Forward-Pass Int6 Quantization [KNOWN]
-**What**: Straight-through estimator — quantize ALL weights to int6 in the forward pass every step, use STE for gradients. Unlike pre-warmdown QAT (periodic nudging), the model always sees quantized weights during training.
-**Motivation**: Pre-warmdown QAT at any strength cannot close int6's +0.063 gap (3 experiments confirm). STE is the standard approach for aggressive quantization-aware training — every forward pass uses quantized weights, gradients pass through as-if continuous.
-**Risk**: High — STE may hurt convergence on Apple Silicon's limited ~700 steps. May need H100's longer training.
-**Expect**: Quant gap < +0.020 if STE works. If gap persists, int6 is H100-only.
+### ~~Experiment 057: Cosine Warmdown Shape [SWEEP]~~ COMPLETED — DISCARD
+**Result**: val_bpb=1.6503 (+0.020 BPB). Cosine keeps LR too high too long, insufficient fine convergence. Linear warmdown is optimal. Kill warmdown shape experiments.
 
 ### Experiment 058: Accept Int6 is H100-Only [STRATEGY]
 **What**: Skip int6 gap closure on Mac entirely. On H100 with 1500+ steps, the model may naturally find quantization-friendly basins, or the gap may be acceptable given the massive artifact savings (6.9MB vs 13.1MB = room for 12+ layers).
@@ -86,6 +83,7 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Strong int8 QAT (strength=0.2, every=5)~~ [SWEEP] — identical to exp_051. QAT saturated. Pure env-var sweep
 - ~~Strong int6 QAT (strength=0.3, every=5)~~ [OUR TWIST] — +0.063 gap, KILLED. 3 exps confirm int6 gap impervious to QAT
 - ~~Full-training QAT (QAT_STOP_LR_MUL=0)~~ [SWEEP] — neutral, quant gap slightly better but pre-quant worse. Effects cancel
+- ~~Cosine warmdown shape~~ [SWEEP] — +0.020 BPB, linear is optimal. Kill warmdown shape experiments
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
@@ -115,3 +113,4 @@ See EXPERIMENT_LOG.md for details. Key killed ideas:
 - Depth-recurrent warmdown (any alpha) — warmdown too sensitive for auxiliary losses
 - Int6 pre-warmdown QAT at any strength — 3 experiments confirm gap is ~+0.063 regardless (exp_049/052/055)
 - Full-training QAT (QAT_STOP_LR_MUL=0) — neutral vs pre-warmdown-only, no benefit (exp_056)
+- Cosine warmdown shape — +0.020 BPB, linear is optimal. Kill warmdown shape experiments (exp_057)

@@ -9,7 +9,7 @@ commit: 4585b0b
 val_bpb: 1.6299 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,091,119 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_051_qat_prewarmdown.txt
-next_exp: 057
+next_exp: 058
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -42,6 +42,7 @@ Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of t
 - **Warmdown-aware WD scheduling [ORIGINAL]**: `wd = base_wd * (2 - lr_mul)`. Extra -0.010 BPB and -1.1MB over constant WD. Nobody in competition uses this.
 - **WD "worse early, better late"**: Higher WD hurts intermediate checkpoints but wins at convergence. Crossover ~step 1500.
 - **Warmdown=1200 optimal**: Reducing to 400 was worse on BPB AND artifact. Don't touch.
+- **Linear warmdown shape is optimal**: Cosine warmdown (exp_057) is clearly worse (+0.020 BPB). Cosine keeps LR too high too long, then drops too fast — insufficient time for fine convergence. The steady linear decay distributes convergence effort evenly. Kill warmdown shape experiments.
 
 ## Quantization
 

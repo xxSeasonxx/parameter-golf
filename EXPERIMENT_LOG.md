@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_056 Full-training QAT (discarded — neutral, QAT during warmdown doesn't hurt but doesn't help)
+**Latest**: exp_057 Cosine warmdown shape (discarded — +0.020 BPB, linear warmdown is optimal)
 
 ---
 
@@ -68,6 +68,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 054 | exp_054_strong_qat | Strong QAT (strength=0.2, every=5, 4x signal) | 712/2000 | 1.6299 | 13.1MB | Discard | Identical to exp_051. QAT regularization saturated — don't tune further |
 | 055 | exp_055_strong_int6_qat | Strong int6 QAT (strength=0.3, every=5, QAT_BITS=6) | 713/2000 | 1.6904 | 6.9MB | Discard | +0.063 quant gap — int6 QAT killed (3 exps confirm gap is ~+0.063 regardless of QAT) |
 | 056 | exp_056_full_qat | Full-training QAT (QAT_STOP_LR_MUL=0) | 704/2000 | 1.6308 | 13.1MB | Discard | Neutral — quant gap slightly better (+0.0025 vs +0.0029) but pre-quant worse (1.6283 vs 1.6270). Effects cancel |
+| 057 | exp_057_cosine_warmdown | Cosine warmdown shape (WARMDOWN_SHAPE=cosine) | 696/2000 | 1.6503 | 12.7MB | Discard | +0.020 BPB regression. Cosine keeps LR too high too long, insufficient fine convergence. Linear warmdown is optimal |
 
 ---
 
@@ -868,6 +869,32 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - QAT during warmdown closes quant gap slightly better (+0.0025 vs +0.0029) but at cost of slightly worse pre-quant BPB (1.6283 vs 1.6270). Effects cancel.
 - The "sacred warmdown" principle has nuance: loss-modifying interventions (SWA, depth recurrence, ramping QAT) clearly hurt, but weight perturbations (constant QAT noise) are tolerated. The warmdown is sensitive to what's being changed, not just that something is being changed.
 - Keep pre-warmdown-only config (QAT_STOP_LR_MUL=0.8) — it has the best pre-quant BPP and post-quant is identical within noise.
+
+---
+
+### Experiment 057: Cosine Warmdown Shape (Discard)
+
+**Hypothesis**: Cosine warmdown shape (`lr_mul = 0.5 * (1 + cos(pi * (1 - t)))`) spends more time at higher LR and drops faster at the end, potentially finding better optima before final convergence.
+
+**Config**: Best config + `WARMDOWN_SHAPE=cosine`. Code change: ~5 lines in `lr_mul()` to apply cosine transformation when shape is "cosine" and t < 1.0.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6466** at step 696 — worse than best pre-quant (1.6270 from exp_051).
+- Post-quant val_bpb=**1.6503** — **+0.020 BPB worse** than best (1.6299).
+- 696 steps at ~863ms/step. Artifact: **12,749,219 bytes (12.7MB)** — smaller than best (13.1MB), likely from less-converged weights compressing better.
+
+**Analysis**:
+- Cosine warmdown is clearly worse (+0.020 BPB). The cosine curve keeps LR too high for too long during the warmdown phase — by the time it drops, there isn't enough time for fine convergence.
+- With linear warmdown, the steady LR decay gives the model continuous opportunity to converge to sharper minima. The gradual, even decrease matches the optimization landscape better than cosine's plateau-then-plunge shape.
+- The smaller artifact (12.7MB vs 13.1MB) is a red herring — the weights are less trained (fewer effective low-LR steps), producing less structured weights that happen to compress slightly better.
+- This is consistent with our broader finding that the warmdown phase is critical and sensitive. Linear decay is the most predictable schedule for this aggressive warmdown regime (~1200 steps of warmdown with only ~700 total steps).
+
+**Decision**: **DISCARD**. Kill warmdown shape experiments. Linear warmdown is optimal for this training regime.
+
+**Learnings**:
+- Cosine warmdown shape is clearly worse (+0.020 BPB). Linear warmdown is optimal.
+- The steady LR decay of linear warmdown allows fine convergence that cosine's rapid end-drop cannot match.
+- With only ~700 steps and warmdown dominating training, the shape of the decay curve matters — linear gives the most even distribution of convergence effort across the warmdown phase.
 
 ---
 
