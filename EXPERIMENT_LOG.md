@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_059 Higher matrix_lr=0.06 (discarded — +0.009 BPB, Muon already well-scaled at 0.04)
+**Latest**: exp_061 Lower tied_embed_lr=0.03 (discarded — +0.011 BPB, embed LR sweep fully closed)
 
 ---
 
@@ -71,6 +71,8 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 057 | exp_057_cosine_warmdown | Cosine warmdown shape (WARMDOWN_SHAPE=cosine) | 696/2000 | 1.6503 | 12.7MB | Discard | +0.020 BPB regression. Cosine keeps LR too high too long, insufficient fine convergence. Linear warmdown is optimal |
 | 058 | exp_058_label_smooth | Label smoothing (0.1) | 692/2000 | 2.0499 | 12.9MB | Discard | CATASTROPHIC +0.42 BPB. Smoothing redistributes too much mass with vocab=1024. Training objective diverges from eval metric |
 | 059 | exp_059_higher_lr | MATRIX_LR=0.06 (1.5x) | 703/2000 | 1.6391 | 13.3MB | Discard | +0.009 BPB. Higher LR overshoots — Muon orthogonalized updates well-scaled at 0.04. Kill LR sweep |
+| 060 | exp_060_high_embed_lr | TIED_EMBED_LR=0.1 (2x) | 705/2000 | 1.6598 | 13.2MB | Discard | +0.030 BPB. Tied embeddings extremely LR-sensitive. Kill embed LR sweep upward |
+| 061 | exp_061_low_embed_lr | TIED_EMBED_LR=0.03 (0.6x) | 690/2000 | 1.6407 | 13.0MB | Discard | +0.011 BPB. Lower embed LR under-trains. Embed LR sweep fully closed: 0.05 is the sweet spot |
 
 ---
 
@@ -981,6 +983,41 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - Tied embeddings are 3x more LR-sensitive than Muon matrix params (0.030 vs 0.009 per 50% LR increase).
 - The dual-use nature (input lookup + output projection) makes the embedding uniquely sensitive: errors propagate through both the forward pass input AND the output logits.
 - Adam's embed LR is already well-calibrated at 0.05. Don't sweep upward. A downward sweep (e.g., 0.03) is unlikely to help given the plateau.
+
+---
+
+### Experiment 061: Lower Tied Embed LR (Discard -- Embed LR Sweep Fully Closed)
+
+**Hypothesis**: Lower tied_embed_lr=0.03 (0.6x default 0.05) provides more stable embedding learning by reducing the update magnitude to the sensitive tied embedding.
+
+**Config**: Pure env-var change: `TIED_EMBED_LR=0.03`. All else identical to exp_051 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6382** at step 690 -- worse than best pre-quant (1.6270 from exp_051).
+- Post-quant val_bpb=**1.6407** -- **+0.011 BPB worse** than best (1.6299).
+- 690 steps at ~870ms/step. Artifact: **13,029,285 bytes (13.0MB)**.
+- Compression ratio: 3.85x (unchanged).
+- Early training was normal (step 2 loss=12.0, step 3 loss=10.4 -- elevated but not explosive like exp_060's 24.4/19.9). The lower LR avoids the instability of higher LR but simply doesn't train the embedding fast enough.
+
+**Analysis**:
+- The lower embed LR under-trains the embedding. With only ~700 steps on Apple Silicon, the embedding needs sufficient LR to develop good representations. At 0.03, the embedding converges too slowly and doesn't reach the quality achieved at 0.05.
+- Compare with exp_060 (embed_lr=0.1, +0.030 BPB): higher LR is 3x worse than lower LR (+0.030 vs +0.011). This asymmetry makes sense -- overshooting the tied embedding is more damaging than under-training it, because the dual-use embedding (input+output) amplifies errors in both directions through the forward pass.
+- The embed LR sweep is now fully closed: 0.03 (+0.011), 0.05 (best), 0.10 (+0.030). The response curve is V-shaped with minimum at 0.05. No further exploration needed.
+
+**Embed LR sweep summary**:
+| Embed LR | Experiment | val_bpb | Delta vs Best | Early Training |
+|----------|-----------|---------|---------------|----------------|
+| 0.03 | exp_061 | 1.6407 | +0.011 | Normal (loss=12.0 at step 2) |
+| **0.05** | **exp_051** | **1.6299** | **baseline** | **Normal (loss=6.9)** |
+| 0.10 | exp_060 | 1.6598 | +0.030 | Explosive (loss=24.4 at step 2) |
+
+**Decision**: **DISCARD**. Embed LR sweep is fully closed. 0.05 is the sweet spot.
+
+**Learnings**:
+- Tied embed_lr=0.05 is optimal. Both lower (0.03, +0.011) and higher (0.10, +0.030) are worse. The V-shaped response has its minimum at 0.05.
+- The tied embedding's dual role (input lookup + output projection) makes it sensitive to LR in both directions: too high destabilizes, too low under-trains.
+- The asymmetry (higher LR is 3x worse) suggests the embedding is more sensitive to overshooting than undershooting -- consistent with the dual-use amplification of errors.
+- This closes the embed LR sweep definitively. No further exploration needed in any direction.
 
 ---
 

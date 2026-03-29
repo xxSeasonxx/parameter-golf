@@ -85,7 +85,8 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Cosine warmdown shape~~ [SWEEP] — +0.020 BPB, linear is optimal. Kill warmdown shape experiments
 - ~~Label smoothing (0.1)~~ [KNOWN] — +0.42 BPB CATASTROPHIC. Vocab=1024 too small, loss objective mismatch
 - ~~Higher matrix_lr=0.06 (1.5x)~~ [SWEEP] — +0.009 BPB, Muon already well-scaled at 0.04. Kill LR sweep
-- ~~Higher tied_embed_lr=0.1 (2x)~~ [SWEEP] — +0.030 BPB, tied embeddings extremely LR-sensitive. Kill embed LR sweep upward
+- ~~Higher tied_embed_lr=0.1 (2x)~~ [SWEEP] — +0.030 BPB, tied embeddings extremely LR-sensitive
+- ~~Lower tied_embed_lr=0.03 (0.6x)~~ [SWEEP] — +0.011 BPB, lower embed LR under-trains. Embed LR sweep fully closed: 0.05 is the V-shaped minimum
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
@@ -118,4 +119,4 @@ See EXPERIMENT_LOG.md for details. Key killed ideas:
 - Cosine warmdown shape — +0.020 BPB, linear is optimal. Kill warmdown shape experiments (exp_057)
 - Label smoothing — +0.42 BPB CATASTROPHIC with vocab=1024. Loss objective mismatch kills performance (exp_058)
 - Matrix LR sweep — matrix_lr=0.06 overshoots (+0.009 BPB), Muon's orthogonalized updates are well-scaled at 0.04 (exp_059)
-- Embed LR sweep upward — embed_lr=0.1 (2x default) gives +0.030 BPB, tied embeddings extremely sensitive. Adam's 0.05 is well-tuned (exp_060)
+- Embed LR sweep (both directions) — embed_lr=0.1 (2x) gives +0.030 BPB, embed_lr=0.03 (0.6x) gives +0.011 BPB. V-shaped response with minimum at 0.05. Fully closed (exp_060/061)
