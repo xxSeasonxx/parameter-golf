@@ -1306,8 +1306,10 @@ def main() -> None:
         train_loss_value = float(train_loss.item())  # .item() triggers mx.eval() for this scalar
         opt.step(model, grads, step=step, lr_mul=lr_mul)
 
-        # QAT: nudge weights toward their quantized form during pre-warmdown.
-        if args.qat_prewarmdown and lr_mul >= args.qat_stop_lr_mul and step % args.qat_every == 0:
+        # QAT: nudge weights toward their quantized form.
+        # Pre-warmdown mode: only during lr_mul >= threshold. Full mode: all steps.
+        qat_active = args.qat_prewarmdown and step % args.qat_every == 0
+        if qat_active and (not args.qat_stop_lr_mul or lr_mul >= args.qat_stop_lr_mul):
             flat = {k: v for k, v in tree_flatten(model.state)}
             qat_updates = {}
             for name, w in flat.items():
