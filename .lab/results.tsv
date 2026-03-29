@@ -36,3 +36,4 @@ f0fdd78	1.6364	13188283	discard	exp_047: LOGIT_SOFTCAP=15.0 — +0.006 BPB worse
 179f1cc	1.6894	6936812	discard	exp_052: Int6 QAT (QAT_BITS=6, strength=0.1, every=10) — +0.061 quant gap barely improved from exp_049. Pre-quant 1.6281 best ever (int6 noise as regularizer)
 6171851	1.6378	12913555	discard	exp_053: Depth-recurrent warmdown (alpha=0.1, layers 2,3,4) — +0.008 BPB, -0.2MB artifact. Convergence cost > compression benefit
 4585b0b	1.6299	13105555	discard	exp_054: Strong QAT (strength=0.2, every=5) — identical to exp_051. QAT regularization saturated
+a040c35	1.6904	6938640	discard	exp_055: Strong int6 QAT (QAT_BITS=6, strength=0.3, every=5) — +0.063 quant gap, int6 QAT killed. Pre-quant 1.6271

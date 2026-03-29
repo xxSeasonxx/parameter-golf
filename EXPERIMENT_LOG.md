@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_054 Strong QAT (discarded, identical to exp_051 — QAT regularization saturated)
+**Latest**: exp_055 Strong Int6 QAT (discarded — int6 quant gap impervious to QAT at any strength)
 
 ---
 
@@ -66,6 +66,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 052 | exp_052_int6_qat | Int6 QAT (QAT_BITS=6, strength=0.1, every=10) + QUANT_BITS=6 | 712/2000 | 1.6894 | 6.9MB | Discard | +0.061 quant gap barely improved from +0.064. Pre-quant 1.6281 best ever (int6 noise as regularizer) |
 | 053 | exp_053_depth_recur | Depth-recurrent warmdown (alpha=0.1, layers 2,3,4) | 711/2000 | 1.6378 | 12.9MB | Discard | +0.008 BPB, -0.2MB. Warmdown too sensitive for auxiliary losses |
 | 054 | exp_054_strong_qat | Strong QAT (strength=0.2, every=5, 4x signal) | 712/2000 | 1.6299 | 13.1MB | Discard | Identical to exp_051. QAT regularization saturated — don't tune further |
+| 055 | exp_055_strong_int6_qat | Strong int6 QAT (strength=0.3, every=5, QAT_BITS=6) | 713/2000 | 1.6904 | 6.9MB | Discard | +0.063 quant gap — int6 QAT killed (3 exps confirm gap is ~+0.063 regardless of QAT) |
 
 ---
 
@@ -801,6 +802,43 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - QAT regularization saturates quickly for int8. 4x more signal produces identical BPB. It's a binary threshold, not a gradient.
 - Don't tune QAT hyperparameters further for int8. Strength=0.1, every=10 is sufficient.
 - This distinguishes int8 QAT from int6 QAT: int8 noise is small enough that any reasonable amount saturates the benefit. Int6 noise is large enough that the saturation threshold is much higher (exp_052 was clearly below it).
+
+---
+
+### Experiment 055: Strong Int6 QAT (Discard — Int6 QAT Killed)
+
+**Hypothesis**: 6x stronger int6 QAT (strength=0.3, every=5 vs exp_052's 0.1/10) should close the int6 quant gap (+0.061-0.064 BPB) by giving the model proportionally more exposure to int6 quantization noise during pre-warmdown training.
+
+**Config**: Best config + `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.3 QAT_EVERY=5 QAT_STOP_LR_MUL=0.8 QAT_BITS=6 QUANT_BITS=6`.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6271** at step 713 — excellent, matches best pre-quant ever (1.6270 from exp_051).
+- Post-int6 val_bpb=**1.6904** — **+0.063 BPB quant gap**. Barely moved from exp_052's +0.061 or exp_049's +0.064.
+- 713 steps at ~842ms/step. Artifact: **6,938,640 bytes (6.9MB)**.
+
+**The definitive int6 QAT result — three experiments confirm:**
+
+| Experiment | QAT Config | Pre-quant BPB | Post-int6 BPB | Quant Gap |
+|------------|-----------|---------------|---------------|-----------|
+| exp_049 | No QAT | 1.6332 | 1.6975 | +0.064 |
+| exp_052 | strength=0.1, every=10 | 1.6281 | 1.6894 | +0.061 |
+| exp_055 | strength=0.3, every=5 | 1.6271 | 1.6904 | +0.063 |
+
+The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data points spanning no-QAT to 6x-strong QAT all land in the same band. Pre-warmdown QAT cannot close the int6 quant gap.
+
+**Root cause analysis**:
+- Int6 quantization maps each weight to one of 63 levels ([-31, +31]). The per-weight error is ~1.6% of the weight range.
+- Pre-warmdown QAT periodically rounds weights to these 63 levels, nudging the optimizer to prefer quantization-friendly values. But the 63-level grid is so coarse that "quantization-friendly" and "optimal for loss" are fundamentally different objectives.
+- With int8 (255 levels), the grid is fine enough that QAT can trivially close the gap (~0.003 BPB). With int6, the gap is 20x larger and structurally resistant to pre-warmdown nudging.
+- Closing int6 gap likely requires: (1) STE (straight-through estimator) in the forward pass — every step sees quantized weights, not just periodic nudging; (2) post-training calibration (GPTQ/AWQ) which optimally adjusts weights to minimize layer-wise reconstruction error; or (3) simply more training steps on H100 where the model can find deeper quantization-friendly basins.
+
+**Decision**: **DISCARD**. Kill all int6 QAT experiments on Apple Silicon. The pre-warmdown QAT approach that works beautifully for int8 fundamentally cannot close the int6 gap.
+
+**Learnings**:
+- Int6 quant gap is ~+0.063 BPB regardless of QAT strength (3 experiments, no-QAT through 6x-strong).
+- Pre-warmdown QAT cannot close the int6 gap — 63 levels is fundamentally too coarse for periodic nudging.
+- Int6 QAT does improve pre-quant BPB (regularization effect scales with noise), but cannot fix serialization damage.
+- Kill int6 QAT on Mac. Need STE forward-pass quantization, GPTQ post-training calibration, or H100's longer training.
 
 ---
 

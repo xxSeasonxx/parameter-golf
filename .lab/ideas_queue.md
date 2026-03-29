@@ -37,12 +37,8 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 ### ~~Experiment 052: Pre-Warmdown QAT + Int6 [OUR TWIST]~~ COMPLETED — DISCARD
 **Result**: Post-int6 val_bpb=1.6894 (+0.061 quant gap, barely improved from exp_049's +0.064). Pre-quant val_bpb=1.6281 (best ever — int6 noise is excellent regularizer). Strength=0.1 every 10 steps is far too gentle for int6's coarser quantization. Artifact 6.9MB (mechanism works). Need 6x stronger QAT for int6.
 
-### Experiment 055: Strong Int6 QAT [OUR TWIST]
-**What**: Int6 QAT with 6x stronger signal: `QAT_STRENGTH=0.3 QAT_EVERY=5 QAT_BITS=6 QUANT_BITS=6`. Same pre-warmdown timing (lr_mul >= 0.8).
-**Motivation**: exp_052 showed strength=0.1/every=10 barely closes int6 gap (+0.064 to +0.061). Int6 has 63 vs 255 levels — need proportionally stronger training signal. 6x more total QAT signal (3x strength * 2x frequency).
-**Run**: Best config + `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.3 QAT_EVERY=5 QAT_STOP_LR_MUL=0.8 QAT_BITS=6 QUANT_BITS=6`.
-**Expect**: Quant gap should close significantly. Risk: stronger QAT noise may hurt pre-quant BPB (regularization has diminishing returns). Target: quant gap < +0.020 BPB.
-**Baseline**: exp_052 quant gap +0.061. exp_049 (no QAT) +0.064.
+### ~~Experiment 055: Strong Int6 QAT [OUR TWIST]~~ COMPLETED — DISCARD
+**Result**: Post-int6 val_bpb=1.6904 (+0.063 quant gap). Pre-quant 1.6271 (matches best). 3 experiments now confirm int6 quant gap is ~+0.063 regardless of QAT strength. Pre-warmdown QAT cannot close the int6 gap — 63 levels is fundamentally too coarse. **Int6 QAT killed on Apple Silicon.** Need STE forward-pass quantization or GPTQ for int6.
 
 ### ~~Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]~~ COMPLETED — DISCARD
 **Result**: val_bpb=1.6378 (+0.008 BPB), artifact 12.9MB (-0.2MB). Even gentle alpha=0.1 during warmdown hurts convergence. Negligible compression benefit. Warmdown phase is sacred — no auxiliary losses allowed.
@@ -65,12 +61,27 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Gradient clipping=0.5~~ [SWEEP] — -0.016 BPB
 - ~~Batch scaling to 24576~~ [SWEEP] — -0.082 BPB (biggest single win)
 
-### Session 3 (exp_048-053): val_bpb 1.6309 → 1.6299
+### Future: Int6 Gap Closure (H100 or advanced techniques)
+
+### Experiment 056: STE Forward-Pass Int6 Quantization [KNOWN]
+**What**: Straight-through estimator — quantize ALL weights to int6 in the forward pass every step, use STE for gradients. Unlike pre-warmdown QAT (periodic nudging), the model always sees quantized weights during training.
+**Motivation**: Pre-warmdown QAT at any strength cannot close int6's +0.063 gap (3 experiments confirm). STE is the standard approach for aggressive quantization-aware training — every forward pass uses quantized weights, gradients pass through as-if continuous.
+**Risk**: High — STE may hurt convergence on Apple Silicon's limited ~700 steps. May need H100's longer training.
+**Expect**: Quant gap < +0.020 if STE works. If gap persists, int6 is H100-only.
+
+### Experiment 057: Accept Int6 is H100-Only [STRATEGY]
+**What**: Skip int6 gap closure on Mac entirely. On H100 with 1500+ steps, the model may naturally find quantization-friendly basins, or the gap may be acceptable given the massive artifact savings (6.9MB vs 13.1MB = room for 12+ layers).
+**Motivation**: Three failed int6 QAT attempts suggest Mac's ~700 steps is insufficient. H100's 2-3x more steps + potential SWA may close the gap naturally.
+
+---
+
+### Session 3 (exp_048-055): val_bpb 1.6309 → 1.6299
 - ~~Pre-warmdown QAT (fix exp_036)~~ [**OUR TWIST**] — -0.001 BPB, NEW BEST (QAT as regularizer)
 - ~~Int6 quantization (QUANT_BITS=6)~~ [KNOWN] — +0.064 BPB quant gap, needs QAT
 - ~~Int6 QAT (strength=0.1, every=10)~~ [OUR TWIST] — +0.061 quant gap, too gentle. Pre-quant 1.6281 best ever
 - ~~Depth-recurrent warmdown (alpha=0.1)~~ [**ORIGINAL**] — +0.008 BPB, -0.2MB. KILLED (warmdown is sacred)
 - ~~Strong int8 QAT (strength=0.2, every=5)~~ [SWEEP] — identical to exp_051. QAT saturated. Pure env-var sweep
+- ~~Strong int6 QAT (strength=0.3, every=5)~~ [OUR TWIST] — +0.063 gap, KILLED. 3 exps confirm int6 gap impervious to QAT
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
@@ -98,3 +109,4 @@ See EXPERIMENT_LOG.md for details. Key killed ideas:
 - Ramping warmdown QAT, SWA on Mac, inverse layer LR
 - Extreme MLP asymmetry (1,5), KV_HEADS=2, SOFTCAP=15
 - Depth-recurrent warmdown (any alpha) — warmdown too sensitive for auxiliary losses
+- Int6 pre-warmdown QAT at any strength — 3 experiments confirm gap is ~+0.063 regardless (exp_049/052/055)
