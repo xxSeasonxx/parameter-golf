@@ -114,6 +114,7 @@ class Hyperparameters:
     qat_strength: float = float(os.environ.get("QAT_STRENGTH", 0.1))
     qat_stop_lr_mul: float = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
     qat_every: int = int(os.environ.get("QAT_EVERY", 10))
+    qat_bits: int = int(os.environ.get("QAT_BITS", 0))  # 0 = use QUANT_BITS
 
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
@@ -669,11 +670,11 @@ INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 
-def sim_quant_roundtrip(w: mx.array) -> mx.array:
-    """Simulate int8 quantize→dequantize roundtrip in MLX ops (stays on GPU).
-    Per-row for 2D, per-tensor for 1D. Mirrors the actual int8 quantization path."""
+def sim_quant_roundtrip(w: mx.array, qmax_override: int = 0) -> mx.array:
+    """Simulate quantize→dequantize roundtrip in MLX ops (stays on GPU).
+    Per-row for 2D, per-tensor for 1D. Mirrors the actual quantization path."""
     f = w.astype(mx.float32)
-    qmax = float(QUANT_MAX_VAL)
+    qmax = float(qmax_override if qmax_override > 0 else QUANT_MAX_VAL)
     if f.ndim == 2:
         row_max = mx.maximum(mx.max(mx.abs(f), axis=1, keepdims=True), 1.0 / qmax)
         scale = row_max / qmax
@@ -1308,6 +1309,7 @@ def main() -> None:
 
         # QAT: nudge weights toward their quantized form during pre-warmdown.
         if args.qat_prewarmdown and lr_mul >= args.qat_stop_lr_mul and step % args.qat_every == 0:
+            qat_qmax = {6: 31, 8: 127}.get(args.qat_bits, 0)
             flat = {k: v for k, v in tree_flatten(model.state)}
             qat_updates = {}
             for name, w in flat.items():
@@ -1315,7 +1317,7 @@ def main() -> None:
                     continue
                 if INT8_KEEP_FLOAT_FP16_NAME_PATTERNS and any(p in name for p in INT8_KEEP_FLOAT_FP16_NAME_PATTERNS):
                     continue
-                w_q = sim_quant_roundtrip(w)
+                w_q = sim_quant_roundtrip(w, qat_qmax)
                 qat_updates[name] = w + args.qat_strength * (w_q - w)
             if qat_updates:
                 model.update(tree_unflatten(list(qat_updates.items())))
