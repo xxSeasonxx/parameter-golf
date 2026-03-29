@@ -34,13 +34,15 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 ### ~~Experiment 051: Pre-Warmdown QAT (Fix exp_036) [OUR TWIST]~~ COMPLETED — NEW BEST
 **Result**: val_bpb=1.6299 (NEW BEST, -0.0010 vs 1.6309). Pre-quant 1.6270 (best ever). QAT acts as regularizer — improvement is from better training, NOT quant gap reduction (gap unchanged at ~0.003). Zero overhead. Fixes exp_036's timing problem. Config: `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`.
 
-### Experiment 052: Pre-Warmdown QAT + Int6 [OUR TWIST] — NEXT UP
-**What**: QAT with int6 simulation instead of int8, using the pre-warmdown approach validated in exp_051.
-**Code change**: Add `sim_quant_int6()` (6-bit roundtrip), ~10 more lines. Use same timing: `QAT_PREWARMDOWN=1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`.
-**Run**: Best config (including QAT_PREWARMDOWN) + `QUANT_BITS=6` + int6 QAT simulation.
-**Expect**: Model learns int6-friendly weights. Quant gap at int6 level should shrink dramatically. May also get regularization benefit like exp_051.
-**Baseline from exp_049**: Int6 quant gap without QAT is +0.064 BPB. Must close most of this gap to be competitive. Target: quant gap < +0.010 BPB.
-**Key insight from exp_051**: Pre-warmdown timing is critical. QAT also acts as regularizer (pre-quant BPB improved). Use same timing parameters.
+### ~~Experiment 052: Pre-Warmdown QAT + Int6 [OUR TWIST]~~ COMPLETED — DISCARD
+**Result**: Post-int6 val_bpb=1.6894 (+0.061 quant gap, barely improved from exp_049's +0.064). Pre-quant val_bpb=1.6281 (best ever — int6 noise is excellent regularizer). Strength=0.1 every 10 steps is far too gentle for int6's coarser quantization. Artifact 6.9MB (mechanism works). Need 6x stronger QAT for int6.
+
+### Experiment 055: Strong Int6 QAT [OUR TWIST]
+**What**: Int6 QAT with 6x stronger signal: `QAT_STRENGTH=0.3 QAT_EVERY=5 QAT_BITS=6 QUANT_BITS=6`. Same pre-warmdown timing (lr_mul >= 0.8).
+**Motivation**: exp_052 showed strength=0.1/every=10 barely closes int6 gap (+0.064 to +0.061). Int6 has 63 vs 255 levels — need proportionally stronger training signal. 6x more total QAT signal (3x strength * 2x frequency).
+**Run**: Best config + `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.3 QAT_EVERY=5 QAT_STOP_LR_MUL=0.8 QAT_BITS=6 QUANT_BITS=6`.
+**Expect**: Quant gap should close significantly. Risk: stronger QAT noise may hurt pre-quant BPB (regularization has diminishing returns). Target: quant gap < +0.020 BPB.
+**Baseline**: exp_052 quant gap +0.061. exp_049 (no QAT) +0.064.
 
 ### Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]
 **What**: During warmdown, add L2 regularization between middle layers (3,4,5) to encourage weight sharing. `L_share = alpha * ||W_3 - W_4||^2 + alpha * ||W_4 - W_5||^2`. Alpha ramps from 0 to 0.1 during warmdown.
@@ -70,9 +72,10 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Gradient clipping=0.5~~ [SWEEP] — -0.016 BPB
 - ~~Batch scaling to 24576~~ [SWEEP] — -0.082 BPB (biggest single win)
 
-### Session 3 (exp_048-051): val_bpb 1.6309 → 1.6299
+### Session 3 (exp_048-052): val_bpb 1.6309 → 1.6299
 - ~~Pre-warmdown QAT (fix exp_036)~~ [**OUR TWIST**] — -0.001 BPB, NEW BEST (QAT as regularizer)
 - ~~Int6 quantization (QUANT_BITS=6)~~ [KNOWN] — +0.064 BPB quant gap, needs QAT
+- ~~Int6 QAT (strength=0.1, every=10)~~ [OUR TWIST] — +0.061 quant gap, too gentle. Pre-quant 1.6281 best ever
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 

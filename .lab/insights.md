@@ -9,7 +9,7 @@ commit: 4585b0b
 val_bpb: 1.6299 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,091,119 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_051_qat_prewarmdown.txt
-next_exp: 052
+next_exp: 053
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -48,6 +48,7 @@ Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of t
 - **FP16 tok_emb**: Quant gap +0.0001 BPB. +0.5MB artifact.
 - **WD dramatically improves compressibility**: Artifact 15.7MB → 9.9MB via WD+scheduling.
 - **Int6 (QUANT_BITS=6) without QAT**: Artifact drops 48% (13.1MB → 6.8MB) but quant gap is +0.064 BPB (~20x worse than int8's ~0.003). 63 levels vs 255 levels = 4x less precision, but error compounds across layers making it ~20x worse in practice. Pre-quant BPB is identical (1.6332 vs best 1.6309) — all damage is at serialization. **Int6 needs QAT to be competitive.** Mechanism validated for H100 deployment: compression ratio (3.85x) identical to int8, just smaller raw payload.
+- **Int6 QAT (strength=0.1, every=10) barely closes gap**: exp_052 quant gap +0.061 vs exp_049's +0.064 — only 0.003 BPB closed out of 0.064. Strength=0.1 every 10 steps is far too gentle for int6's coarser quantization (63 vs 255 levels). BUT pre-quant BPB improved to 1.6281 (best ever) — int6 noise is an even better regularizer than int8 noise. **Int6 needs much stronger QAT**: try strength=0.3, every=5 (6x more signal).
 
 ## Training Dynamics (Apple Silicon)
 

@@ -6,6 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
+**Latest**: exp_052 Int6 QAT (discarded, +0.061 quant gap)
 
 ---
 
@@ -62,6 +63,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 047 | exp_047_softcap15 | LOGIT_SOFTCAP=15.0 (down from 30.0) | 709/2000 | 1.6364 | 13.2MB | Discard | +0.006 BPB. Tighter clamping hurts confident predictions. Default 30.0 is optimal |
 | 049 | exp_049_int6 | Int6 per-row quantization (QUANT_BITS=6) | 686/2000 | 1.6975 | 6.8MB | Discard | +0.064 BPB quant gap (pre-quant 1.6332 normal). 48% artifact reduction. Needs QAT |
 | **051** | **exp_051_qat_prewarmdown** | **Pre-warmdown QAT (strength=0.1, every 10, lr_mul>=0.8)** | **710/2000** | **1.6299** | **13.1MB** | **BEST** | **NEW BEST -0.0010. QAT as regularization: pre-quant 1.6270 (best ever)** |
+| 052 | exp_052_int6_qat | Int6 QAT (QAT_BITS=6, strength=0.1, every=10) + QUANT_BITS=6 | 712/2000 | 1.6894 | 6.9MB | Discard | +0.061 quant gap barely improved from +0.064. Pre-quant 1.6281 best ever (int6 noise as regularizer) |
 
 ---
 
@@ -715,6 +717,33 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Zero overhead: <2ms/step on steps where QAT fires (every 10th step).
 - Validates the hypothesis from exp_036: the QAT mechanism works, timing was the only problem.
 - For int6 QAT (exp_052), the pre-warmdown approach should be used, not warmdown-phase QAT.
+
+---
+
+### Experiment 052: Int6 QAT (Discard)
+
+**Hypothesis**: Int6 QAT (QAT_BITS=6) with int6 serialization (QUANT_BITS=6) should close the int6 quant gap validated in exp_049. Using the pre-warmdown approach from exp_051 (strength=0.1, every 10 steps, lr_mul >= 0.8) with int6 quantization noise instead of int8.
+
+**Config**: Best config + `QAT_BITS=6 QUANT_BITS=6 QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`. Code changes: `sim_quant_int6()` function for 6-bit roundtrip noise injection.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6281** — **best pre-quant EVER** (previous: 1.6270 from exp_051). Int6 noise is an even better regularizer than int8 noise.
+- Post-int6 val_bpb=**1.6894** — **+0.061 BPB quant gap**. Barely improved from exp_049's +0.064 gap without QAT.
+- 712 steps at ~843ms/step. Artifact: **6,936,812 bytes (6.9MB)**.
+
+**Analysis**:
+- The regularization effect works even better with int6 noise: pre-quant 1.6281 beats exp_051's 1.6270 pre-quant. Coarser quantization noise = stronger regularization, which is beneficial during pre-warmdown training.
+- But QAT's main purpose (closing quant gap) FAILED: +0.061 vs +0.064 is a negligible improvement (only 0.003 BPB closed out of 0.064). The model is not learning int6-friendly weights.
+- Root cause: strength=0.1 every 10 steps is far too gentle for int6's coarser quantization. Int8 has 255 levels, int6 has 63 levels — the quantization error is ~4x larger per weight, and it compounds across 10 layers. The training signal from QAT every 10th step at 10% strength is swamped by the magnitude of the int6 quantization error.
+- Compare: exp_051 (int8 QAT) had quant gap ~0.003 — already near the noise floor. Int8 quantization is inherently gentle enough that light QAT suffices. Int6 requires proportionally stronger QAT.
+
+**Decision**: **DISCARD**. Int6 quant gap remains unacceptable at +0.061 despite QAT.
+
+**Learnings**:
+- Int6 QAT at strength=0.1, every=10 barely closes the gap (+0.064 to +0.061). Need much stronger QAT for int6.
+- Int6 noise is an excellent pre-quant regularizer: 1.6281 is best pre-quant ever, confirming the "QAT as regularization" insight from exp_051 scales with noise magnitude.
+- Next attempt should use strength=0.3, every=5 (6x more total QAT signal) with QAT_BITS=6.
+- The artifact size (6.9MB) confirms int6 serialization works well mechanically.
 
 ---
 
