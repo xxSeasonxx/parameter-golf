@@ -32,3 +32,4 @@ e9428c5	1.6345	14035696	discard	exp_045: NUM_KV_HEADS=2 — +0.003 BPB vs best, 
 966ddeb	1.6309	13065155	keep	exp_046: WARMUP_STEPS=50 — MARGINAL NEW BEST (-0.0002 vs 1.6311)
 f0fdd78	1.6364	13188283	discard	exp_047: LOGIT_SOFTCAP=15.0 — +0.006 BPB worse. Default 30.0 is well-calibrated
 79261f5	1.6975	6834725	discard	exp_049: Int6 per-row quant (QUANT_BITS=6) — +0.064 BPB quant gap, artifact 48% smaller (6.8MB). Needs QAT
+4585b0b	1.6299	13091119	keep	exp_051: Pre-warmdown QAT (strength=0.1, every 10 steps, lr_mul>=0.8) — NEW BEST (-0.0010 vs 1.6309)

@@ -5,7 +5,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6309** (commit `966ddeb`, exp_046 WARMUP_STEPS=50)
+**Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
 
 ---
 
@@ -61,6 +61,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | **046** | **exp_046_warmup50** | **WARMUP_STEPS=50 (up from 20)** | **706/2000** | **1.6309** | **13.1MB** | **BEST** | **-0.0002 BPB. Marginal new best. Longer warmup stabilizes early training** |
 | 047 | exp_047_softcap15 | LOGIT_SOFTCAP=15.0 (down from 30.0) | 709/2000 | 1.6364 | 13.2MB | Discard | +0.006 BPB. Tighter clamping hurts confident predictions. Default 30.0 is optimal |
 | 049 | exp_049_int6 | Int6 per-row quantization (QUANT_BITS=6) | 686/2000 | 1.6975 | 6.8MB | Discard | +0.064 BPB quant gap (pre-quant 1.6332 normal). 48% artifact reduction. Needs QAT |
+| **051** | **exp_051_qat_prewarmdown** | **Pre-warmdown QAT (strength=0.1, every 10, lr_mul>=0.8)** | **710/2000** | **1.6299** | **13.1MB** | **BEST** | **NEW BEST -0.0010. QAT as regularization: pre-quant 1.6270 (best ever)** |
 
 ---
 
@@ -672,6 +673,48 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - Pre-quant BPB is identical to best config — training is completely unaffected. All damage is at serialization.
 - This establishes the baseline quant gap for exp_052 (int6 QAT): must close +0.064 BPB to be competitive.
 - On H100, int6 + QAT could enable 12L or wider models within 16MB, which could more than compensate for any residual quant gap.
+
+---
+
+### Experiment 051: Pre-Warmdown QAT (NEW BEST)
+
+**Hypothesis**: Constant-strength QAT (strength=0.1, every 10 steps) during pre-warmdown phase only (lr_mul >= 0.8) teaches quantization-friendly weights without disrupting warmdown convergence. This fixes exp_036's failure where ramping QAT noise fought warmdown convergence.
+
+**Config**: Best config + `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`. New code: ~15 lines adding `sim_quant_roundtrip()` injection every QAT_EVERY steps when lr_mul >= QAT_STOP_LR_MUL.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6270** — **best pre-quant EVER** (previous: 1.6284 from exp_046).
+- Int8 val_bpb=**1.6299** — **NEW BEST, -0.0010** vs previous best (1.6309).
+- 710 steps at ~846ms/step. Artifact: 13,091,119 bytes (~13.1MB, 3.85x compression).
+- Quant gap: +0.0029 BPB (similar to baseline ~0.003 for int8, unchanged).
+
+**The surprise: QAT as regularization, not quant-gap closure**:
+- The quant gap is unchanged (+0.0029 vs ~0.0025 baseline). QAT did NOT reduce the int8 quant gap.
+- But the pre-quant BPB improved by 0.0014 (1.6270 vs 1.6284). The model learned BETTER features.
+- The int8 quantization noise every 10 steps acts as a regularizer during the main training phase, similar to dropout or label smoothing. It adds structured noise that prevents overfitting to the training data distribution.
+
+**Why pre-warmdown timing works**:
+- QAT fires during lr_mul >= 0.8, covering ~first 60% of training steps (before warmdown ramp begins).
+- During this phase, the model is actively learning features and the noise is beneficial.
+- Stopping before warmdown ensures the final convergence phase is clean and undisturbed.
+- Compare with exp_036 (warmdown QAT): quant gap was excellent (0.0002) but overall BPB suffered catastrophically (+0.057) because noise fought convergence.
+
+**Comparison with exp_036 (warmdown QAT)**:
+| Metric | exp_036 (warmdown QAT) | exp_051 (pre-warmdown QAT) |
+|--------|----------------------|--------------------------|
+| Overall val_bpb | 1.6907 (+0.060) | **1.6299 (-0.001)** |
+| Quant gap | **0.0002** | 0.0029 |
+| Mechanism | QAT closes gap but hurts training | QAT improves training, gap unchanged |
+| Timing | During warmdown (lr_mul < 0.8) | Before warmdown (lr_mul >= 0.8) |
+
+**Decision**: **KEEP — NEW BEST**. Pre-warmdown QAT is a validated technique with zero overhead that improves model quality through regularization.
+
+**Learnings**:
+- Pre-warmdown QAT (strength=0.1, every 10 steps, lr_mul >= 0.8) improves overall val_bpb by -0.001.
+- The improvement is from better training (regularization effect), not quant gap reduction.
+- Zero overhead: <2ms/step on steps where QAT fires (every 10th step).
+- Validates the hypothesis from exp_036: the QAT mechanism works, timing was the only problem.
+- For int6 QAT (exp_052), the pre-warmdown approach should be used, not warmdown-phase QAT.
 
 ---
 

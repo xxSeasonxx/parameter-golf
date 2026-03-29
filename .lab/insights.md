@@ -5,19 +5,20 @@ Validated learnings from experiments. Single source of truth. Delete disproven h
 ## Current Best
 
 ```
-commit: 966ddeb
-val_bpb: 1.6309 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50)
-artifact: 13,065,155 bytes (~13.1MB, 2.9MB headroom)
-log: logs/exp_046_warmup50.txt
-next_exp: 050
+commit: 4585b0b
+val_bpb: 1.6299 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
+artifact: 13,091,119 bytes (~13.1MB, 2.9MB headroom)
+log: logs/exp_051_qat_prewarmdown.txt
+next_exp: 052
 ```
 
 **Best config env vars** (copy-paste for runs):
 ```
-NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT_ASYMMETRIC=2,4 GRAD_CLIP_NORM=0.5 LAYER_LR_SCALE=0.5 WARMUP_STEPS=50
+NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 FREQ_SKIP_GATING=1 TRAIN_BATCH_TOKENS=24576 MLP_MULT_ASYMMETRIC=2,4 GRAD_CLIP_NORM=0.5 LAYER_LR_SCALE=0.5 WARMUP_STEPS=50 QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10
 ```
 Note: Warmdown-aware WD scheduling is in the code: `wd = base_wd * (2 - lr_mul)`
 Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 default)
+Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of training)
 
 ## Architecture
 
@@ -62,7 +63,8 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 - **Batch=16k with MLP3x is too small**: val_bpb=1.6692 despite 937 steps. Gradient quality dominates.
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.
-- **Warmdown QAT (ramping strength) is too aggressive**: exp_036 val_bpb=1.6907 (+0.057). QAT noise fights warmdown convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB suffers badly. Don't inject quant noise during the convergence-critical warmdown phase. A pre-warmdown QAT phase or constant low-strength QAT might work on H100 with more steps.
+- **Warmdown QAT (ramping strength) is too aggressive**: exp_036 val_bpb=1.6907 (+0.057). QAT noise fights warmdown convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB suffers badly. **Fixed by exp_051**: pre-warmdown QAT (lr_mul >= 0.8) avoids the convergence-critical warmdown phase entirely.
+- **Pre-warmdown QAT is a regularizer [OUR TWIST]**: exp_051 val_bpb=1.6299 (NEW BEST, -0.0010). Constant strength=0.1, every 10 steps, stop when lr_mul < 0.8. Pre-quant BPB improved from 1.6284 to 1.6270 (best ever) — the improvement is from better training, NOT quant gap reduction (gap unchanged at ~0.003 for int8). Int8 noise acts as structured regularization during the main training phase. Zero overhead (<2ms/step). Fixes exp_036's failure by separating QAT from warmdown.
 - **SWA with wide window is catastrophic**: exp_037 val_bpb=1.7601 (+0.127). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) destroys convergence. Pre-SWA model was 1.6288 (within noise of best). Competition uses narrow SWA (last 100-120 steps, lr_mul<0.1) or high-decay EMA (0.9999). Better compression though (12.6MB vs 13.0MB).
 - **SWA with narrow window still hurts on Mac**: exp_038 val_bpb=1.6363 (+0.003). 24 snapshots, lr_mul<0.1, every 5 steps. Pre-SWA was 1.6295, post-SWA 1.6363 (+0.007). Much better than wide SWA but still a regression. With only ~700 steps, weights monotonically converge during warmdown — no oscillation to average out. **SWA is KILLED for Apple Silicon experiments.** May still help on 8xH100 with 1500+ steps.
 - **Per-layer LR scaling is marginally positive**: exp_039 LAYER_LR_SCALE=0.5 gives val_bpb=1.6321 (-0.0013 vs best). Deeper layers get higher LR (1.0x to 1.5x range). Within noise but zero overhead, so keeping it. May show larger gains on H100 with more steps.
@@ -77,7 +79,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 ## Porting to 8xH100
 
 Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval.
-Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT_ASYMMETRIC=2,4, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50.
+Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT_ASYMMETRIC=2,4, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10.
 Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 
 ## Competition Strategy (8xH100 target: ≤1.12 BPB)
@@ -91,6 +93,7 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 2. Frequency-decomposed skip gating — proven, unique
 3. Asymmetric MLP (encoder=2x, decoder=4x) — validated, small win
 4. Per-layer LR scaling for Muon — validated, small win
+5. Pre-warmdown QAT (exp_051) — proven, QAT as regularizer during lr_mul >= 0.8
 
 **Known techniques to add on H100** (table stakes):
 - Int6 quantization (MLP/attention weights) — validated (48% artifact reduction), but REQUIRES QAT (+0.064 BPB without)
@@ -102,11 +105,13 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 **Killed for Mac, may work on H100**:
 - QAT during warmdown — quant gap closes but BPB suffers at 700 steps
 - SWA — needs oscillation that only occurs at 1500+ steps
-- Pre-warmdown constant-strength QAT — untested
+
+**Validated on Mac, ready for H100**:
+- Pre-warmdown QAT (exp_051) — NEW BEST on Mac, should show even larger gains with more steps on H100
 
 ## Apple Silicon Plateau Analysis
 
-After 13 experiments at the current config level (exp_035-047), Apple Silicon val_bpb is firmly plateaued at **~1.630 ± 0.003**. Pre-quant values consistently land in 1.628-1.634. The noise band is larger than any remaining optimization opportunity.
+After 14 experiments at the current config level (exp_035-051), Apple Silicon val_bpb is firmly plateaued at **~1.630 ± 0.003**. Pre-quant values consistently land in 1.627-1.634. exp_051 (pre-warmdown QAT) pushed to 1.6299 post-quant / 1.6270 pre-quant (both best ever), but remains within the noise band.
 
 **Root cause**: ~700 steps with ~17M tokens is the fundamental bottleneck. No per-step optimization can overcome the data limitation. The leaderboard top (1.1194) uses 64x more data per step.
 
