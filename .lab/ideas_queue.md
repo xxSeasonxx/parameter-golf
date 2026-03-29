@@ -23,30 +23,28 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 **Expect**: Artifact drops ~10-15% (13.1MB → ~11-12MB). BPB unchanged.
 **Why first**: Zero risk, pure compression win, tells us how much headroom we gain.
 
-### Experiment 049: Int6 Quantization [KNOWN]
-**What**: 6-bit per-row quantization for matrix weights (clip to [-31,31], scale=max/31). Embeddings stay fp16, control tensors stay fp32.
-**Code change**: ~30 lines. Add `QUANT_BITS` env var. New `quantize_float_array_int6()` function. Modify `quantize_state_dict_int8` to dispatch based on bits.
-**Run**: Best config + `QUANT_BITS=6`.
-**Expect**: Artifact drops to ~8-9MB. BPB degrades +0.01-0.03 (more on Mac than H100). The point is validating the mechanism, not the absolute BPB.
-**Why**: Fits ~40% more effective params in 16MB. This is what gets competition entries from 1.17 to 1.13.
+### ~~Experiment 049: Int6 Quantization [KNOWN]~~ COMPLETED — DISCARD
+**Result**: Artifact 6.8MB (48% reduction, better than expected). But quant gap +0.064 BPB (~20x worse than int8). Pre-quant 1.6332 (normal). Post-int6 1.6975. Mechanism validated but needs QAT. See exp_052.
 
 ### Experiment 050: Int6 + Zstd Combined [KNOWN]
 **What**: Both int6 and zstd together.
 **Run**: Best config + `QUANT_BITS=6` + zstd enabled.
 **Expect**: Artifact ~7-8MB. Massive headroom for larger model on H100.
 
-### Experiment 051: Pre-Warmdown QAT (Fix exp_036) [OUR TWIST]
+### Experiment 051: Pre-Warmdown QAT (Fix exp_036) [OUR TWIST] — NOW CRITICAL
 **What**: Constant-strength QAT (strength=0.1) during pre-warmdown phase only (lr_mul >= 0.8). Stop QAT when warmdown begins. This fixes exp_036's failure where ramping noise fought warmdown convergence.
 **Code change**: ~15 lines. Reuse `sim_quant_int8()`. Add `QAT_PREWARMDOWN` env var, `QAT_STRENGTH` (fixed, not ramping), `QAT_STOP_LR_MUL` (threshold to stop).
 **Run**: Best config + `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`.
 **Expect**: Quant gap shrinks (from ~0.003 to ~0.001). Overall BPB similar or slightly better.
 **Key insight from exp_036**: The mechanism works (quant gap closed to 0.0002) but timing was wrong. Pre-warmdown QAT separates "learning to quantize" from "final convergence."
+**ELEVATED PRIORITY**: exp_049 showed int6 needs QAT (+0.064 BPB gap). This experiment validates the QAT mechanism at int8 level first, before attempting int6 QAT in exp_052.
 
 ### Experiment 052: Pre-Warmdown QAT + Int6 [OUR TWIST]
 **What**: QAT with int6 simulation instead of int8.
 **Code change**: Add `sim_quant_int6()`, ~10 more lines.
 **Run**: Best config + int6 QAT.
 **Expect**: Model learns int6-friendly weights. Quant gap at int6 level should shrink.
+**Baseline from exp_049**: Int6 quant gap without QAT is +0.064 BPB. Must close most of this gap to be competitive. Target: quant gap < +0.010 BPB.
 
 ### Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]
 **What**: During warmdown, add L2 regularization between middle layers (3,4,5) to encourage weight sharing. `L_share = alpha * ||W_3 - W_4||^2 + alpha * ||W_4 - W_5||^2`. Alpha ramps from 0 to 0.1 during warmdown.

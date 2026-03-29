@@ -9,7 +9,7 @@ commit: 966ddeb
 val_bpb: 1.6309 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50)
 artifact: 13,065,155 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_046_warmup50.txt
-next_exp: 048
+next_exp: 050
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -46,6 +46,7 @@ Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 defau
 
 - **FP16 tok_emb**: Quant gap +0.0001 BPB. +0.5MB artifact.
 - **WD dramatically improves compressibility**: Artifact 15.7MB → 9.9MB via WD+scheduling.
+- **Int6 (QUANT_BITS=6) without QAT**: Artifact drops 48% (13.1MB → 6.8MB) but quant gap is +0.064 BPB (~20x worse than int8's ~0.003). 63 levels vs 255 levels = 4x less precision, but error compounds across layers making it ~20x worse in practice. Pre-quant BPB is identical (1.6332 vs best 1.6309) — all damage is at serialization. **Int6 needs QAT to be competitive.** Mechanism validated for H100 deployment: compression ratio (3.85x) identical to int8, just smaller raw payload.
 
 ## Training Dynamics (Apple Silicon)
 
@@ -92,7 +93,7 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 4. Per-layer LR scaling for Muon — validated, small win
 
 **Known techniques to add on H100** (table stakes):
-- Int6 quantization (MLP/attention weights) — biggest expected gain
+- Int6 quantization (MLP/attention weights) — validated (48% artifact reduction), but REQUIRES QAT (+0.064 BPB without)
 - TTT LoRA at eval time (already in codebase)
 - SWA (H100-only, needs 1500+ steps)
 - Zstd-22 compression (replace zlib)

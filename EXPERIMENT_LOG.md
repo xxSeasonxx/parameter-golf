@@ -60,6 +60,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 045 | exp_045_kv2 | NUM_KV_HEADS=2 (aggressive GQA) | 723/2000 | 1.6345 | 14.0MB | Discard | +0.003 vs best. Fewer KV heads hurts BPB and compression |
 | **046** | **exp_046_warmup50** | **WARMUP_STEPS=50 (up from 20)** | **706/2000** | **1.6309** | **13.1MB** | **BEST** | **-0.0002 BPB. Marginal new best. Longer warmup stabilizes early training** |
 | 047 | exp_047_softcap15 | LOGIT_SOFTCAP=15.0 (down from 30.0) | 709/2000 | 1.6364 | 13.2MB | Discard | +0.006 BPB. Tighter clamping hurts confident predictions. Default 30.0 is optimal |
+| 049 | exp_049_int6 | Int6 per-row quantization (QUANT_BITS=6) | 686/2000 | 1.6975 | 6.8MB | Discard | +0.064 BPB quant gap (pre-quant 1.6332 normal). 48% artifact reduction. Needs QAT |
 
 ---
 
@@ -642,6 +643,35 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 - The model genuinely benefits from being able to make confident predictions. Common tokens have near-deterministic distributions that require large logit magnitudes to represent accurately.
 
 **Decision**: **DISCARD**. Keep LOGIT_SOFTCAP=30.0 (default).
+
+---
+
+### Experiment 049: Int6 Per-Row Quantization (Discard)
+
+**Hypothesis**: 6-bit per-row quantization ([-31,31] range, 63 levels) should dramatically reduce artifact size via better zlib compression of smaller integers. Primary goal is validating the int6 mechanism for H100 deployment; expected BPB degradation without QAT.
+
+**Config**: Best config + `QUANT_BITS=6`. New `quantize_float_array_int6()` function clips to [-31,31] with per-row scaling.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6332** at step 686 — within noise of best (1.6309). Training is unaffected by quantization changes.
+- Post-int6 val_bpb=**1.6975** — **+0.064 BPB quant gap** vs pre-quant, **+0.067 vs best**.
+- 686 steps at 875ms/step. Artifact: **6,834,725 bytes (6.8MB)** — **48% smaller** than int8 (13.1MB).
+- Payload ratio: 3.85x (identical to int8 — the compression ratio is the same, but the raw payload is much smaller because 6-bit integers occupy less space).
+
+**Analysis**:
+- The artifact size reduction is massive: 6.8MB vs 13.1MB. On H100 with 16MB limit, this opens ~9.2MB of headroom — enough for 12+ layers or wider MLP.
+- But the quant gap is catastrophic: +0.064 BPB. For comparison, int8 quant gap is ~0.003 BPB. Int6 is **~20x worse**.
+- The error amplification is non-linear: 63 levels (int6) vs 255 levels (int8) = 4x less precision, but the quantization noise compounds across 10 transformer layers. Each layer's output error feeds into the next layer's input, creating multiplicative degradation.
+- Pre-quant 1.6332 confirms the model trains identically — all damage is purely at serialization time. This is the strongest possible motivation for QAT: teach the model to be robust to int6 quantization noise during training.
+
+**Decision**: **DISCARD**. Int6 without QAT has an unacceptable quant gap. The mechanism is validated (artifact reduction works, compression ratio maintained) but QAT is mandatory to make int6 competitive.
+
+**Learnings**:
+- Int6 (QUANT_BITS=6) reduces artifact 48% (13.1MB to 6.8MB) but quant gap is +0.064 BPB without QAT.
+- The quant gap is ~20x worse than int8 (~0.003). Error compounds across layers — not a simple 4x precision loss.
+- Pre-quant BPB is identical to best config — training is completely unaffected. All damage is at serialization.
+- This establishes the baseline quant gap for exp_052 (int6 QAT): must close +0.064 BPB to be competitive.
+- On H100, int6 + QAT could enable 12L or wider models within 16MB, which could more than compensate for any residual quant gap.
 
 ---
 
