@@ -648,6 +648,8 @@ MX_DTYPE_FROM_NAME = {
     "bfloat16": mx.bfloat16,
 }
 
+QUANT_BITS = int(os.environ.get("QUANT_BITS", 8))
+QUANT_MAX_VAL = {6: 31, 8: 127}[QUANT_BITS]  # 2^(bits-1) - 1
 INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
 # Tensors matching these patterns are kept as FP16 regardless of size (not int8 quantized).
 # Use for critical tensors like tied embeddings where quantization error hurts disproportionately.
@@ -682,14 +684,14 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
         # ranges much better than a single tensor-wide scale.
         clip_abs = np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1) if f32.size else np.empty((f32.shape[0],), dtype=np.float32)
         clipped = np.clip(f32, -clip_abs[:, None], clip_abs[:, None])
-        scale = np.maximum(clip_abs / 127.0, 1.0 / 127.0).astype(np.float32, copy=False)
-        q = np.clip(np.round(clipped / scale[:, None]), -127, 127).astype(np.int8, copy=False)
+        scale = np.maximum(clip_abs / QUANT_MAX_VAL, 1.0 / QUANT_MAX_VAL).astype(np.float32, copy=False)
+        q = np.clip(np.round(clipped / scale[:, None]), -QUANT_MAX_VAL, QUANT_MAX_VAL).astype(np.int8, copy=False)
         return np.ascontiguousarray(q), np.ascontiguousarray(scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False))
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(np.quantile(np.abs(f32).reshape(-1), INT8_CLIP_Q)) if f32.size else 0.0
-    scale = np.array(clip_abs / 127.0 if clip_abs > 0.0 else 1.0, dtype=np.float32)
-    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
+    scale = np.array(clip_abs / QUANT_MAX_VAL if clip_abs > 0.0 else 1.0, dtype=np.float32)
+    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -QUANT_MAX_VAL, QUANT_MAX_VAL).astype(np.int8, copy=False)
     return np.ascontiguousarray(q), scale
 
 
@@ -740,7 +742,7 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
         dtypes[name] = str(arr.dtype).split(".")[-1]
         stats["int8_payload_bytes"] += int(q.nbytes + s.nbytes)
     obj: dict[str, object] = {
-        "__quant_format__": "int8_clean_per_row_v1",
+        "__quant_format__": f"int{QUANT_BITS}_clean_per_row_v1",
         "quantized": quantized,
         "scales": scales,
         "dtypes": dtypes,
