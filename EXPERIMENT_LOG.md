@@ -955,6 +955,35 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 
 ---
 
+### Experiment 060: Higher Tied Embed LR (Discard)
+
+**Hypothesis**: Higher tied_embed_lr=0.1 (2x default 0.05) improves embedding learning by giving the shared input/output embedding more optimization signal during the limited ~700 steps on Apple Silicon.
+
+**Config**: Pure env-var change: `TIED_EMBED_LR=0.1`. All else identical to exp_051 best config.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6573** at step 705 — significantly worse than best pre-quant (1.6270 from exp_051).
+- Post-quant val_bpb=**1.6598** — **+0.030 BPB worse** than best (1.6299). The largest regression from any LR sweep.
+- 705 steps at ~852ms/step. Artifact: **13,180,922 bytes (13.2MB)**.
+- Compression ratio: 3.85x (unchanged).
+- Early training was unstable: step 2 loss=24.4, step 3 loss=19.9 (vs typical ~6.9). The 50-step warmup partially recovered but the damage to early feature learning persisted.
+
+**Analysis**:
+- The tied embedding serves dual duty: input token lookup AND output logit projection. This shared representation is extremely sensitive to learning rate — a 2x increase destabilizes both the input and output interfaces simultaneously.
+- The early training instability (loss spikes to 24.4 at step 2) suggests the higher LR causes catastrophic updates to the embedding matrix in the first few gradient steps, before warmup ramps to full LR. Even though warmup recovers the training loss, the initial damage to embedding structure persists through the run.
+- Compare with matrix_lr sweep (exp_059, +0.009 BPB at 1.5x): the embed LR is 3x more sensitive than matrix LR. This makes sense — matrix params are orthogonalized by Newton-Schulz (bounded update scale), while Adam updates to embeddings have no such normalization.
+- The artifact size (13.2MB vs 13.1MB) is marginally larger, consistent with slightly less regular embeddings from the higher LR.
+
+**Decision**: **DISCARD**. Kill embed LR sweep upward. Adam's default 0.05 is already well-tuned for the delicate tied embedding.
+
+**Learnings**:
+- Tied embed_lr=0.05 is optimal. 2x higher gives +0.030 BPB — the worst regression from any single LR change.
+- Tied embeddings are 3x more LR-sensitive than Muon matrix params (0.030 vs 0.009 per 50% LR increase).
+- The dual-use nature (input lookup + output projection) makes the embedding uniquely sensitive: errors propagate through both the forward pass input AND the output logits.
+- Adam's embed LR is already well-calibrated at 0.05. Don't sweep upward. A downward sweep (e.g., 0.03) is unlikely to help given the plateau.
+
+---
+
 > **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---

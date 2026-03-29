@@ -41,3 +41,4 @@ a040c35	1.6904	6938640	discard	exp_055: Strong int6 QAT (QAT_BITS=6, strength=0.
 73ad98a	1.6503	12749219	discard	exp_057: Cosine warmdown shape (WARMDOWN_SHAPE=cosine) — +0.020 BPB regression. Linear warmdown is optimal
 2cd8dba	2.0499	12944370	discard	exp_058: Label smoothing (0.1) — CATASTROPHIC +0.42 BPB. Smoothing redistributes too much mass with vocab=1024, training objective diverges from eval metric
 0fd62ee	1.6391	13309291	discard	exp_059: MATRIX_LR=0.06 (1.5x default) — +0.009 BPB, higher LR overshoots. Muon already well-scaled at 0.04. Kill LR sweep
+5b61bdd	1.6598	13180922	discard	exp_060: TIED_EMBED_LR=0.1 (2x default 0.05) — +0.030 BPB, higher embed LR hurts. Adam's 0.05 is well-tuned for tied embeddings
