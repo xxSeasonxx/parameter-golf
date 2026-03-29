@@ -44,18 +44,11 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 **Expect**: Quant gap should close significantly. Risk: stronger QAT noise may hurt pre-quant BPB (regularization has diminishing returns). Target: quant gap < +0.020 BPB.
 **Baseline**: exp_052 quant gap +0.061. exp_049 (no QAT) +0.064.
 
-### Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]
-**What**: During warmdown, add L2 regularization between middle layers (3,4,5) to encourage weight sharing. `L_share = alpha * ||W_3 - W_4||^2 + alpha * ||W_4 - W_5||^2`. Alpha ramps from 0 to 0.1 during warmdown.
-**Code change**: ~20 lines. Add `DEPTH_RECURRENCE_WARMDOWN` env var, compute pairwise L2 between designated layers, add to loss.
-**Run**: Best config + `DEPTH_RECURRENCE_WARMDOWN=1`.
-**Expect**: Middle layer weights converge toward each other. Measure L2 distance between layers before/after. If distance < 5% of weight norm, we can share weights at serialization → ~2-3MB artifact savings.
-**Why original**: Nobody does depth recurrence as a warmdown regularizer. This is "train deep, compress to recurrent."
-**Risk**: Could hurt BPB if alpha too high. Start gentle (0.1).
+### ~~Experiment 053: Depth-Recurrent Warmdown (Gentle) [ORIGINAL, HIGH RISK]~~ COMPLETED — DISCARD
+**Result**: val_bpb=1.6378 (+0.008 BPB), artifact 12.9MB (-0.2MB). Even gentle alpha=0.1 during warmdown hurts convergence. Negligible compression benefit. Warmdown phase is sacred — no auxiliary losses allowed.
 
-### Experiment 054: Depth Recurrence (Stronger) [ORIGINAL]
-**What**: Same as 053 but alpha=0.5.
-**Run**: If 053 shows weight convergence, push harder.
-**Expect**: Layers become nearly identical. Artifact savings 3-4MB.
+### ~~Experiment 054: Depth Recurrence (Stronger) [ORIGINAL]~~ KILLED
+**Reason**: exp_053 (gentle, alpha=0.1) already hurts +0.008 BPB. Stronger alpha would be worse. Depth recurrence during warmdown is a dead end.
 
 ---
 
@@ -72,10 +65,11 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 - ~~Gradient clipping=0.5~~ [SWEEP] — -0.016 BPB
 - ~~Batch scaling to 24576~~ [SWEEP] — -0.082 BPB (biggest single win)
 
-### Session 3 (exp_048-052): val_bpb 1.6309 → 1.6299
+### Session 3 (exp_048-053): val_bpb 1.6309 → 1.6299
 - ~~Pre-warmdown QAT (fix exp_036)~~ [**OUR TWIST**] — -0.001 BPB, NEW BEST (QAT as regularizer)
 - ~~Int6 quantization (QUANT_BITS=6)~~ [KNOWN] — +0.064 BPB quant gap, needs QAT
 - ~~Int6 QAT (strength=0.1, every=10)~~ [OUR TWIST] — +0.061 quant gap, too gentle. Pre-quant 1.6281 best ever
+- ~~Depth-recurrent warmdown (alpha=0.1)~~ [**ORIGINAL**] — +0.008 BPB, -0.2MB. KILLED (warmdown is sacred)
 - Zstd compression — not yet run
 - Int6 + Zstd combined — not yet run
 
@@ -102,3 +96,4 @@ See EXPERIMENT_LOG.md for details. Key killed ideas:
 - Batch=32k (too slow), 11L+MLP3x on Mac (too heavy)
 - Ramping warmdown QAT, SWA on Mac, inverse layer LR
 - Extreme MLP asymmetry (1,5), KV_HEADS=2, SOFTCAP=15
+- Depth-recurrent warmdown (any alpha) — warmdown too sensitive for auxiliary losses

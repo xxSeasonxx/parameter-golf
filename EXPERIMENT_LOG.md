@@ -747,6 +747,34 @@ All changes are in `train_gpt_mlx.py`. No other training files were modified.
 
 ---
 
+### Experiment 053: Depth-Recurrent Warmdown (Discard)
+
+**Hypothesis**: During warmdown, add L2 regularization between middle encoder layers (2,3,4) to encourage weight sharing. `L_share = alpha * sum(||W_i - W_j||^2)` for adjacent pairs. Alpha ramps from 0 to 0.1 during warmdown (`alpha * (1 - lr_mul)`). If layers converge, we can deduplicate at serialization for artifact savings.
+
+**Config**: Best config + `DEPTH_RECURRENCE=1 DEPTH_RECURRENCE_ALPHA=0.1 DEPTH_RECURRENCE_LAYERS=2,3,4`. New code: ~25 lines computing pairwise L2 between designated layers and adding to loss during warmdown.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6345** at step 711 — worse than best pre-quant (1.6270 from exp_051).
+- Int8 val_bpb=**1.6378** — **+0.008 BPB worse** than best (1.6299).
+- 711 steps at ~844ms/step. Artifact: **12,913,555 bytes (12.9MB)** — only -0.2MB smaller than best (13.1MB).
+- Compression ratio: 3.85x (unchanged).
+
+**Analysis**:
+- The artifact savings are negligible: 12.9MB vs 13.1MB (-0.2MB). The L2 nudging at alpha=0.1 during warmdown is too gentle to actually make layers similar enough for meaningful deduplication.
+- But the BPB cost is real: +0.008 is a significant regression (comparable to DropHead or SWA). Even gentle auxiliary losses during warmdown interfere with the convergence dynamics.
+- This confirms a broader principle: **the warmdown phase is sacred**. Both QAT (exp_036, +0.057) and depth recurrence (exp_053, +0.008) degrade BPB when applied during warmdown. Only pre-warmdown techniques (exp_051, QAT as regularizer) work.
+- The 0.2MB saving would require nearly identical weights across layers 2,3,4 to be worthwhile (full deduplication could save ~3MB). At alpha=0.1, the layers are nowhere near identical.
+
+**Decision**: **DISCARD**. Kill depth recurrence as a warmdown technique. The convergence cost (+0.008 BPB) far exceeds the compression benefit (-0.2MB). Stronger alpha would only make the BPB regression worse.
+
+**Learnings**:
+- Depth-recurrent warmdown (alpha=0.1, layers 2,3,4) hurts BPB +0.008 for only -0.2MB artifact savings.
+- Even gentle auxiliary losses during warmdown interfere with convergence. The warmdown phase must remain clean.
+- Pattern confirmed: warmdown-phase interventions (SWA, QAT, depth recurrence) all hurt on Apple Silicon. Only pre-warmdown interventions work.
+- Kill exp_054 (stronger depth recurrence, alpha=0.5) — if gentle already hurts, stronger will be worse.
+
+---
+
 > **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---

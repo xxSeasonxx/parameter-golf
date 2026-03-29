@@ -115,12 +115,6 @@ class Hyperparameters:
     qat_stop_lr_mul: float = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
     qat_every: int = int(os.environ.get("QAT_EVERY", 10))
 
-    # Depth recurrence warmdown: L2 penalty between adjacent middle layers during warmdown.
-    # Encourages weight sharing → artifact savings via deduplication at serialization.
-    depth_recurrence: bool = bool(int(os.environ.get("DEPTH_RECURRENCE", "0")))
-    depth_recurrence_alpha: float = float(os.environ.get("DEPTH_RECURRENCE_ALPHA", 0.1))
-    depth_recurrence_layers: str = os.environ.get("DEPTH_RECURRENCE_LAYERS", "3,4,5")  # layer indices to share
-
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
     # stride=64 matches the competition's best evaluation strategy.
@@ -1325,27 +1319,6 @@ def main() -> None:
                 qat_updates[name] = w + args.qat_strength * (w_q - w)
             if qat_updates:
                 model.update(tree_unflatten(list(qat_updates.items())))
-
-        # Depth recurrence: nudge middle layers toward their mean during warmdown.
-        if args.depth_recurrence and lr_mul < 1.0:
-            dr_layers = [int(x) for x in args.depth_recurrence_layers.split(",")]
-            alpha = args.depth_recurrence_alpha * (1.0 - lr_mul)  # ramp: 0 at warmdown start → alpha at end
-            dr_updates = {}
-            # For each parameter name suffix (e.g. "attn.qkv.weight"), compute mean across layers and nudge
-            param_suffixes = set()
-            for name, _ in tree_flatten(model.blocks[dr_layers[0]].state):
-                param_suffixes.add(name)
-            for suffix in param_suffixes:
-                layer_params = []
-                for li in dr_layers:
-                    layer_params.append(dict(tree_flatten(model.blocks[li].state))[suffix])
-                mean_param = sum(p.astype(mx.float32) for p in layer_params) / len(layer_params)
-                for li in dr_layers:
-                    full_name = f"blocks.{li}.{suffix}"
-                    w = dict(tree_flatten(model.blocks[li].state))[suffix]
-                    dr_updates[full_name] = (w + alpha * (mean_param.astype(w.dtype) - w))
-            if dr_updates:
-                model.update(tree_unflatten(list(dr_updates.items())))
 
         # mx.synchronize() is the timing fence — everything above is lazy/async. This blocks
         # until all Metal GPU work finishes, giving accurate wall-clock step timing.
