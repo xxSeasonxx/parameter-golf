@@ -9,7 +9,7 @@ commit: 4585b0b
 val_bpb: 1.6299 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,091,119 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_051_qat_prewarmdown.txt
-next_exp: 056
+next_exp: 057
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -68,6 +68,7 @@ Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of t
 - **Depth-recurrent warmdown is KILLED**: exp_053 depth recurrence (alpha=0.1, layers 2,3,4, ramping during warmdown) hurts BPB +0.008 for only -0.2MB artifact savings (12.9MB vs 13.1MB). Even gentle nudging during warmdown interferes with convergence — the warmdown phase is too sensitive for any auxiliary loss. The compression benefit (layer weight similarity) doesn't justify the quality cost. Kill depth recurrence as a warmdown technique. Might be viable as a pre-warmdown technique (like QAT), but the expected compression gain (~0.2MB) is too small to justify the complexity.
 - **Pre-warmdown QAT is a regularizer [OUR TWIST]**: exp_051 val_bpb=1.6299 (NEW BEST, -0.0010). Constant strength=0.1, every 10 steps, stop when lr_mul < 0.8. Pre-quant BPB improved from 1.6284 to 1.6270 (best ever) — the improvement is from better training, NOT quant gap reduction (gap unchanged at ~0.003 for int8). Int8 noise acts as structured regularization during the main training phase. Zero overhead (<2ms/step). Fixes exp_036's failure by separating QAT from warmdown.
 - **QAT regularization saturates for int8**: exp_054 4x stronger QAT (strength=0.2, every=5) produces identical BPB to exp_051 (strength=0.1, every=10). Both pre-quant (1.6272 vs 1.6270) and post-quant (1.6299 vs 1.6299) are within noise. The regularization effect is a binary threshold — either you have QAT or you don't. Don't tune QAT hyperparameters for int8. (Note: int6 QAT does NOT saturate at these levels — exp_052 showed strength=0.1/every=10 is insufficient for int6's larger noise.)
+- **Full-training QAT (QAT_STOP_LR_MUL=0) is neutral vs pre-warmdown-only**: exp_056 QAT through warmdown gives slightly better quant gap (+0.0025 vs +0.0029) but slightly worse pre-quant BPB (1.6283 vs 1.6270). Effects cancel (post-quant 1.6308 vs 1.6299, within noise). Key insight: the "sacred warmdown" rule applies to loss-modifying interventions (SWA, depth recurrence) but NOT to weight perturbations like constant-strength QAT noise. Keep pre-warmdown-only config (QAT_STOP_LR_MUL=0.8).
 - **SWA with wide window is catastrophic**: exp_037 val_bpb=1.7601 (+0.127). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) destroys convergence. Pre-SWA model was 1.6288 (within noise of best). Competition uses narrow SWA (last 100-120 steps, lr_mul<0.1) or high-decay EMA (0.9999). Better compression though (12.6MB vs 13.0MB).
 - **SWA with narrow window still hurts on Mac**: exp_038 val_bpb=1.6363 (+0.003). 24 snapshots, lr_mul<0.1, every 5 steps. Pre-SWA was 1.6295, post-SWA 1.6363 (+0.007). Much better than wide SWA but still a regression. With only ~700 steps, weights monotonically converge during warmdown — no oscillation to average out. **SWA is KILLED for Apple Silicon experiments.** May still help on 8xH100 with 1500+ steps.
 - **Per-layer LR scaling is marginally positive**: exp_039 LAYER_LR_SCALE=0.5 gives val_bpb=1.6321 (-0.0013 vs best). Deeper layers get higher LR (1.0x to 1.5x range). Within noise but zero overhead, so keeping it. May show larger gains on H100 with more steps.
@@ -106,7 +107,7 @@ Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 - 11 layers (free on H100)
 
 **Killed for Mac, may work on H100**:
-- QAT during warmdown — quant gap closes but BPB suffers at 700 steps
+- QAT during warmdown — quant gap closes but BPB suffers at 700 steps. Full-training QAT (exp_056) is neutral (gap slightly better, pre-quant slightly worse, effects cancel)
 - SWA — needs oscillation that only occurs at 1500+ steps
 
 **Validated on Mac, ready for H100**:

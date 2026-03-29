@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_055 Strong Int6 QAT (discarded — int6 quant gap impervious to QAT at any strength)
+**Latest**: exp_056 Full-training QAT (discarded — neutral, QAT during warmdown doesn't hurt but doesn't help)
 
 ---
 
@@ -67,6 +67,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 053 | exp_053_depth_recur | Depth-recurrent warmdown (alpha=0.1, layers 2,3,4) | 711/2000 | 1.6378 | 12.9MB | Discard | +0.008 BPB, -0.2MB. Warmdown too sensitive for auxiliary losses |
 | 054 | exp_054_strong_qat | Strong QAT (strength=0.2, every=5, 4x signal) | 712/2000 | 1.6299 | 13.1MB | Discard | Identical to exp_051. QAT regularization saturated — don't tune further |
 | 055 | exp_055_strong_int6_qat | Strong int6 QAT (strength=0.3, every=5, QAT_BITS=6) | 713/2000 | 1.6904 | 6.9MB | Discard | +0.063 quant gap — int6 QAT killed (3 exps confirm gap is ~+0.063 regardless of QAT) |
+| 056 | exp_056_full_qat | Full-training QAT (QAT_STOP_LR_MUL=0) | 704/2000 | 1.6308 | 13.1MB | Discard | Neutral — quant gap slightly better (+0.0025 vs +0.0029) but pre-quant worse (1.6283 vs 1.6270). Effects cancel |
 
 ---
 
@@ -839,6 +840,34 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - Pre-warmdown QAT cannot close the int6 gap — 63 levels is fundamentally too coarse for periodic nudging.
 - Int6 QAT does improve pre-quant BPB (regularization effect scales with noise), but cannot fix serialization damage.
 - Kill int6 QAT on Mac. Need STE forward-pass quantization, GPTQ post-training calibration, or H100's longer training.
+
+---
+
+### Experiment 056: Full-Training QAT (Discard — Neutral)
+
+**Hypothesis**: Full-training QAT (QAT_STOP_LR_MUL=0, running through warmdown) helps convergence to a more quantization-friendly minimum by maintaining QAT noise through the entire training including warmdown, unlike exp_051 which stops at lr_mul=0.8.
+
+**Config**: Best config + `QAT_STOP_LR_MUL=0` (QAT runs through warmdown instead of stopping at lr_mul=0.8). All else identical to exp_051.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6283** at step 704 — slightly worse than exp_051's 1.6270.
+- Int8 val_bpb=**1.6308** — +0.0009 vs best (1.6299). Within noise.
+- Quant gap: **+0.0025** (slightly better than exp_051's +0.0029).
+- 704 steps at ~853ms/step. Artifact: **13,085,184 bytes (13.1MB)**.
+
+**Analysis**:
+- QAT during warmdown does close the quant gap slightly better (+0.0025 vs +0.0029 = -0.0004 improvement). This makes sense: the model continues seeing quantization noise through warmdown, so final weights are slightly more quantization-friendly.
+- But pre-quant BPB is slightly worse (1.6283 vs 1.6270 = +0.0013). The QAT noise during warmdown mildly interferes with convergence, just as predicted from exp_036 (where ramping warmdown QAT was catastrophic at +0.057).
+- The two effects cancel: -0.0004 quant gap improvement + +0.0013 pre-quant regression = +0.0009 net regression. Within noise.
+- This is an interesting contrast with other warmdown interventions: SWA (+0.127), depth recurrence (+0.008), and ramping QAT (+0.057) all clearly hurt during warmdown. Constant-strength QAT during warmdown is merely neutral. The difference is that SWA/depth-recurrence modify the loss objective, while QAT only perturbs weights. Weight perturbation is tolerated; loss modification is not.
+
+**Decision**: **DISCARD**. Neutral result — within noise of best. Pre-warmdown-only QAT (exp_051) remains the better config.
+
+**Learnings**:
+- Full-training QAT (QAT_STOP_LR_MUL=0) is neutral vs pre-warmdown-only (QAT_STOP_LR_MUL=0.8).
+- QAT during warmdown closes quant gap slightly better (+0.0025 vs +0.0029) but at cost of slightly worse pre-quant BPB (1.6283 vs 1.6270). Effects cancel.
+- The "sacred warmdown" principle has nuance: loss-modifying interventions (SWA, depth recurrence, ramping QAT) clearly hurt, but weight perturbations (constant QAT noise) are tolerated. The warmdown is sensitive to what's being changed, not just that something is being changed.
+- Keep pre-warmdown-only config (QAT_STOP_LR_MUL=0.8) — it has the best pre-quant BPP and post-quant is identical within noise.
 
 ---
 
