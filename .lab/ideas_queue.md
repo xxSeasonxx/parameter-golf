@@ -38,12 +38,8 @@ Run these in order. Each = one commit per program.md.
 **Run**: Best config + FREQ_SKIP_BANDS=3.
 **Expect**: -0.001 to -0.005 BPB beyond current 2-band.
 
-### Experiment 066: XSA on Decoder Layers [KNOWN, HIGH VALUE]
-**What**: Exclusive Self Attention — subtract each token's own value contribution from attention output. Apply to last 3-4 decoder layers only.
-**Hypothesis**: Forces model to learn only context-dependent information, not self-reinforcing patterns. 4 of 5 top teams use this. Zero new parameters. Expected -0.002 to -0.005 BPB.
-**Code change**: In CausalSelfAttention.forward, after attention output, compute self-value component and subtract. Add XSA_LAYERS env var.
-**Run**: Best config + XSA_LAYERS=3.
-**Expect**: -0.002 to -0.005 BPB.
+### ~~Experiment 066: XSA on Decoder Layers~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6222, +0.0007 BPB (neutral). Self-exclusion removes 1/1024 context — too small at 10L. No speed penalty from custom mask. Worth trying on H100 with 11L+ where deeper layers benefit more from pure-context signals.
 
 ### Experiment 067: Partial RoPE (25% dims) [KNOWN, ZERO COST]
 **What**: Apply RoPE to first 16 of 64 head dimensions only. Remaining 48 dims attend without positional bias.

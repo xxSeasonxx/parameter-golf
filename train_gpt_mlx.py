@@ -90,9 +90,6 @@ class Hyperparameters:
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
     freq_skip_gating: bool = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
     freq_skip_window: int = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
-    # XSA: Exclusive Self Attention — subtract self-value from last N decoder layers.
-    # 0 = disabled. N = apply XSA to the last N blocks.
-    xsa_layers: int = int(os.environ.get("XSA_LAYERS", 0))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -347,7 +344,6 @@ class CausalSelfAttention(nn.Module):
         num_kv_heads: int,
         rope_base: float,
         qk_gain_init: float,
-        use_xsa: bool = False,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -369,7 +365,6 @@ class CausalSelfAttention(nn.Module):
         # traditional=False selects the "non-interleaved" / GPT-NeoX style rotation.
         self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
         self.scale = self.head_dim ** -0.5
-        self.use_xsa = use_xsa
 
     def __call__(self, x: mx.array) -> mx.array:
         bsz, seqlen, dim = x.shape
@@ -380,19 +375,9 @@ class CausalSelfAttention(nn.Module):
         q = self.rope(rms_norm(q).astype(COMPUTE_DTYPE))
         k = self.rope(rms_norm(k).astype(COMPUTE_DTYPE))
         q = q * self.q_gain.astype(q.dtype)[None, :, None, None]
-        if self.use_xsa:
-            # XSA: causal mask excluding self-attention (j < i, strictly).
-            # Position 0 keeps self-attention since it has no other context.
-            indices = mx.arange(seqlen)
-            mask = indices[None, :] < indices[:, None]  # j < i (strict causal)
-            mask = mask | (indices[:, None] == 0) & (indices[None, :] == 0)  # allow (0,0)
-            # Convert to additive mask: 0 for allowed, -inf for blocked
-            mask = mx.where(mask, mx.array(0.0, dtype=q.dtype), mx.array(-1e9, dtype=q.dtype))
-            y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
-        else:
-            # mx.fast.scaled_dot_product_attention dispatches to Metal-optimized attention kernels.
-            # mask="causal" enables the fused causal mask path (no explicit mask tensor needed).
-            y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
+        # mx.fast.scaled_dot_product_attention dispatches to Metal-optimized attention kernels.
+        # mask="causal" enables the fused causal mask path (no explicit mask tensor needed).
+        y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
         y = y.transpose(0, 2, 1, 3).reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -420,12 +405,11 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
-        use_xsa: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
         self.mlp_norm = RMSNormNoWeight()
-        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init, use_xsa=use_xsa)
+        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
@@ -448,7 +432,7 @@ class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
                  qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
-                 mlp_mult_asymmetric: str = "", xsa_layers: int = 0):
+                 mlp_mult_asymmetric: str = ""):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -473,8 +457,7 @@ class GPT(nn.Module):
         else:
             layer_mlp_mults = [mlp_mult] * num_layers
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, layer_mlp_mults[i], rope_base, qk_gain_init,
-                  use_xsa=(xsa_layers > 0 and i >= num_layers - xsa_layers))
+            Block(dim, num_heads, num_kv_heads, layer_mlp_mults[i], rope_base, qk_gain_init)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -1158,7 +1141,6 @@ def main() -> None:
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
-        xsa_layers=args.xsa_layers,
     )
     opt = SplitOptimizers(model, args)
 

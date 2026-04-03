@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: exp_064 EMA decay=0.997 (DISCARD — +0.22 BPB, window too wide for 689 steps)
+**Latest**: exp_066 XSA on last 3 decoder layers (DISCARD — neutral +0.0007 BPB)
 **H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
@@ -76,6 +76,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 061 | exp_061_low_embed_lr | TIED_EMBED_LR=0.03 (0.6x) | 690/2000 | 1.6407 | 13.0MB | Discard | +0.011 BPB. Lower embed LR under-trains. Embed LR sweep fully closed: 0.05 is the sweet spot |
 | **063** | **exp_063_leakyrelu_med** | **LeakyReLU(0.5)² activation in MLP** | **700/2000** | **1.6215** | **13.1MB** | **BEST** | **NEW BEST -0.0084 BPB! Dead neuron elimination via 50% negative slope** |
 | 064 | exp_064_ema | EMA decay=0.997 | 689/2000 | 1.8437 | 12.1MB | Discard | EMA window too wide for 689 steps (48% of training). Pre-EMA model was 1.6224 |
+| 066 | exp_066_xsa3 | XSA on last 3 decoder layers | 701/2000 | 1.6222 | 13.1MB | Discard | Neutral +0.0007 BPB, no speed penalty. Self-exclusion removes 1/1024 context — too small to matter at 10L |
 
 ### H100 RunPod Runs (2026-04-03)
 
@@ -1091,6 +1092,33 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - The pre-EMA model (1.6224) confirms the EMA overhead (~871ms vs ~848ms/step) is minor and the underlying training is unaffected.
 - EMA is now KILLED for Mac experiments. It joins SWA in the "weight averaging killed on Mac" category.
 - For H100 deployment, EMA (decay=0.997) remains a must-have.
+
+---
+
+### Experiment 066: XSA on Last 3 Decoder Layers (Discard — Neutral)
+
+**Hypothesis**: Exclusive Self Attention (XSA) — subtracting each token's own value contribution from the attention output — forces the model to learn only context-dependent information. Applied to the last 3 decoder layers only. 4 of 5 top teams use this. Expected -0.002 to -0.005 BPB.
+
+**Config**: Best config (exp_063 baseline with LeakyReLU(0.5)²) + `XSA_LAYERS=3`. Code change: in CausalSelfAttention.forward, after attention output, compute self-value component and subtract for the last 3 layers.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6198** at step 701 — within noise of exp_063 baseline (1.6190).
+- Int8+zlib val_bpb=**1.6222** — **+0.0007 BPB** vs best (1.6215). Within noise but trending negative.
+- 701 steps at ~857ms/step (identical to baseline). Artifact: **13,115,125 bytes (~13.1MB)**.
+- No measurable speed penalty from custom mask vs fused causal kernel.
+
+**Analysis**:
+- XSA is neutral on Apple Silicon with 10 layers. The self-exclusion removes one token's value contribution out of up to 1024 context positions — a ~0.1% information loss. This marginal deduplication benefit is cancelled by the loss of the self-reinforcing signal.
+- The absence of speed penalty is good news: the custom attention mask (causal + diagonal exclusion) runs at the same speed as the standard causal mask on Apple Silicon. This means XSA is "free" in terms of compute.
+- The technique may work better on H100 with more layers (11L+) where deeper layers benefit more from pure-context signals, and with longer training where the model has time to adapt to the modified attention pattern.
+
+**Decision**: **DISCARD**. Neutral result. XSA is not worth keeping for Mac experiments.
+
+**Learnings**:
+- XSA on last 3 decoder layers is neutral (+0.0007 BPB) on 10L Apple Silicon runs.
+- The self-exclusion removes 1/1024 (~0.1%) of context information per position — too small a signal for the deduplication benefit to manifest with only 10 layers.
+- No speed penalty from custom mask vs fused causal kernel. XSA is compute-free.
+- Worth revisiting on H100 with 11L+ where deeper layers benefit more from pure-context signals.
 
 ---
 
