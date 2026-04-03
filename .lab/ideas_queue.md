@@ -31,12 +31,8 @@ Run these in order. Each = one commit per program.md.
 ### ~~Experiment 064: EMA (decay=0.997)~~ COMPLETED -- DISCARD
 **Result**: val_bpb=1.8437, +0.22 BPB. EMA window (333 steps) = 48% of 689 total steps — dominated by early under-trained weights. Pre-EMA model was 1.6224 (fine). **EMA killed on Mac.** Reserve for H100 where 6000+ steps make decay=0.997 reasonable (~5.5% window).
 
-### Experiment 065: Multi-Band Skip Gating v2 (3 bands) [ORIGINAL, BUILDS ON OUR STRENGTH]
-**What**: Evolve freq-decomposed skip gating from 2 bands to 3: ultra-low (W=128), mid (W=32), high (residual).
-**Hypothesis**: Richer spectral decomposition routes different frequency information through independent channels. Our 2-band version proved -0.010 BPB; 3 bands provides finer control at ~50% more skip parameters (still tiny).
-**Code change**: Add third band decomposition in GPT forward. Three weight vectors per skip.
-**Run**: Best config + FREQ_SKIP_BANDS=3.
-**Expect**: -0.001 to -0.005 BPB beyond current 2-band.
+### ~~Experiment 065: Multi-Band Skip Gating v2 (3 bands)~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6238, +0.0023 BPB. 2-band (W=32) already captures the useful spectral decomposition. Ultra-low band (W=128) is redundant — splits 4 dims from 16 into a separate channel but provides no new information. Extra parameters (5 skip_ulo_weights vectors) are under-constrained. Kill multi-band experiments.
 
 ### ~~Experiment 066: XSA on Decoder Layers~~ COMPLETED -- DISCARD
 **Result**: val_bpb=1.6222, +0.0007 BPB (neutral). Self-exclusion removes 1/1024 context — too small at 10L. No speed penalty from custom mask. Worth trying on H100 with 11L+ where deeper layers benefit more from pure-context signals.

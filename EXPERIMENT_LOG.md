@@ -1148,6 +1148,32 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 
 ---
 
+### Experiment 065: 3-Band Freq-Decomposed Skip Gating (Discard)
+
+**Hypothesis**: 3-band freq-decomposed skip gating (ultra-low W=128, mid W=32, high residual) gives finer spectral control than the 2-band (low W=32, high residual) currently in the best config. Expected -0.001 to -0.005 BPB.
+
+**Config**: Best config (exp_063 baseline with LeakyReLU(0.5)²) + `FREQ_SKIP_BANDS=3`. Code change: add third ultra-low frequency band with W=128 decomposition, 3 weight vectors per skip connection instead of 2.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6212** at step 699 — within noise of exp_063 baseline (1.6190).
+- Int8+zlib val_bpb=**1.6238** — **+0.0023 BPB** vs best (1.6215). DISCARD.
+- 699 steps at ~859ms/step. Artifact: **13,127,542 bytes (~13.1MB)**.
+
+**Analysis**:
+- The 2-band lo/hi decomposition at W=32 already captures the meaningful spectral information in the skip connections. Adding an ultra-low band at W=128 splits 4 dims from the 16-dim low band into a separate channel, but this provides no new information — the W=32 low band already captures trends at that scale.
+- The extra parameters (5 skip_ulo_weights vectors, one per skip connection) are under-constrained with only ~700 training steps and slightly hurt optimization by adding degrees of freedom without signal.
+- Pre-quant regression (+0.0022 vs baseline) confirms the damage is in training quality, not quantization. The additional gating parameters slow convergence without improving the spectral decomposition.
+- This is consistent with exp_044 (W=16 vs W=32 makes no difference): the frequency decomposition is robust to window size because the meaningful information split is between "any local average" and "local residual", not at a specific frequency cutoff.
+
+**Decision**: **DISCARD**. Kill multi-band skip gating experiments. 2-band at W=32 is the sweet spot.
+
+**Learnings**:
+- 2-band skip gating (W=32) already captures the useful spectral decomposition. More bands add parameters without signal.
+- The meaningful information split is binary: local average vs local residual. Finer frequency decomposition is redundant.
+- This closes the skip gating spectral exploration: W=16 (exp_044), W=32 (exp_017, best), 3-band (exp_065) all confirm 2-band W=32 is optimal.
+
+---
+
 > **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---
