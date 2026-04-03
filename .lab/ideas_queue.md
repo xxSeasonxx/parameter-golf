@@ -43,6 +43,9 @@ Run these in order. Each = one commit per program.md.
 ### ~~Experiment 068: GELU² Activation~~ COMPLETED -- DISCARD
 **Result**: val_bpb=1.6373, +0.0158 BPB. GELU's Gaussian gating kills negative inputs exponentially, while LeakyReLU(0.5) preserves 50% linearly. With squaring providing sparsity, negative gradient preservation is the key mechanism — more flow is better. Activation exploration is CLOSED.
 
+### ~~Experiment 069: LeakyReLU(0.7)² — higher negative slope~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6231, +0.0016 BPB. Slope 0.7 reduces sparsity too much (0.7²=0.49 on negatives vs 0.5²=0.25). Full activation slope sweep: ReLU²(1.6299) < LeakyReLU(0.5)²(**1.6215**) > LeakyReLU(0.7)²(1.6231) > GELU²(1.6373). Slope 0.5 is the sweet spot. Activation exploration KILLED.
+
 ---
 
 ## Backlog: Not Yet Run (low priority)

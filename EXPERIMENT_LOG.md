@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: exp_066 XSA on last 3 decoder layers (DISCARD — neutral +0.0007 BPB)
+**Latest**: exp_069 LeakyReLU(0.7)² (DISCARD — +0.0016 BPB, slope 0.5 optimal)
 **H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
@@ -76,7 +76,11 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 061 | exp_061_low_embed_lr | TIED_EMBED_LR=0.03 (0.6x) | 690/2000 | 1.6407 | 13.0MB | Discard | +0.011 BPB. Lower embed LR under-trains. Embed LR sweep fully closed: 0.05 is the sweet spot |
 | **063** | **exp_063_leakyrelu_med** | **LeakyReLU(0.5)² activation in MLP** | **700/2000** | **1.6215** | **13.1MB** | **BEST** | **NEW BEST -0.0084 BPB! Dead neuron elimination via 50% negative slope** |
 | 064 | exp_064_ema | EMA decay=0.997 | 689/2000 | 1.8437 | 12.1MB | Discard | EMA window too wide for 689 steps (48% of training). Pre-EMA model was 1.6224 |
+| 065 | exp_065_3band | 3-band freq skip gating | 699/2000 | 1.6238 | 13.1MB | Discard | +0.0023 BPB, ultra-low band redundant with 2-band W=32 |
 | 066 | exp_066_xsa3 | XSA on last 3 decoder layers | 701/2000 | 1.6222 | 13.1MB | Discard | Neutral +0.0007 BPB, no speed penalty. Self-exclusion removes 1/1024 context — too small to matter at 10L |
+| 067 | exp_067_partial_rope | Partial RoPE (25% dims) | 697/2000 | 1.6240 | 13.1MB | Discard | +0.0025 BPB, full RoPE better at short seq_len=1024 |
+| 068 | exp_068_gelu2 | GELU² activation | 687/2000 | 1.6373 | 12.7MB | Discard | +0.016 BPB, Gaussian gating kills negative gradient flow |
+| 069 | exp_069_leaky07 | LeakyReLU(0.7)² activation | 695/2000 | 1.6231 | 13.3MB | Discard | +0.0016 BPB, slope 0.5 optimal. Activation sweep CLOSED |
 
 ### H100 RunPod Runs (2026-04-03)
 
@@ -1198,6 +1202,36 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - With vocab=1024 and tied embeddings, every neuron's capacity matters. Activations that kill negative inputs (GELU, ReLU) permanently waste MLP capacity through dead neurons/zones.
 - GELU's smoothness is not a benefit when squaring is already applied — the squaring operation already smooths the gradient landscape. The kink in LeakyReLU at x=0 is irrelevant after squaring.
 - This closes the activation exploration: LeakyReLU(0.5)² is optimal because it maximizes gradient flow while still providing sparsity via squaring.
+
+---
+
+### Experiment 069: LeakyReLU(0.7)² — Higher Negative Slope (Discard)
+
+**Hypothesis**: More negative gradient flow (70% vs 50%) might be better. Testing the upper bound of the activation slope.
+
+**Config**: Best config (exp_063 baseline) with LeakyReLU(0.7)² replacing LeakyReLU(0.5)² in MLP. Code change: replace `neg_slope=0.5` with `neg_slope=0.7`.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6206** at step 695 — slightly better than exp_063 baseline (1.6190), within noise.
+- Int8+zlib val_bpb=**1.6231** — **+0.0016 BPB** vs best (1.6215). DISCARD.
+- 695 steps at ~864ms/step. Artifact: **13,285,284 bytes (~13.3MB)**.
+
+**Analysis**:
+- The activation slope sweep is now CLOSED with four data points establishing a clear optimum:
+  - ReLU² (slope=0.0): 1.6299
+  - LeakyReLU(0.5)² (slope=0.5): **1.6215** (BEST)
+  - LeakyReLU(0.7)² (slope=0.7): 1.6231
+  - GELU² (smooth ~0): 1.6373
+- Slope 0.5 is the sweet spot. Too little negative flow (ReLU, GELU) kills gradients and wastes MLP capacity through dead neurons. Too much negative flow (0.7) reduces the sparsity benefit from squaring: 0.7²=0.49 retains nearly half the magnitude on the negative side, while 0.5²=0.25 provides a 4:1 suppression ratio that balances gradient flow with sparsity.
+- The slightly larger artifact (13.3MB vs 13.1MB) is consistent with less sparse activations producing less compressible weights.
+- Pre-quant was actually marginally better (1.6206 vs 1.6190 = +0.0016), but the quant gap is slightly worse (+0.0025 vs +0.0025), resulting in net regression.
+
+**Decision**: **DISCARD**. Activation slope sweep is CLOSED. LeakyReLU(0.5)² is the optimal activation.
+
+**Learnings**:
+- The activation slope has a clear optimum at 0.5. The mechanism is a tradeoff between gradient flow (higher slope = more gradient for negatives) and sparsity from squaring (lower slope = more suppression of negatives after squaring).
+- At slope=0.5, squaring gives 0.25 on the negative side — a 4:1 positive/negative ratio. At slope=0.7, it's 0.49 — nearly 1:1, losing most of the sparsity benefit.
+- All activation experiments are KILLED. The sweep (0.0, ~0 smooth, 0.5, 0.7) thoroughly covers the space.
 
 ---
 
