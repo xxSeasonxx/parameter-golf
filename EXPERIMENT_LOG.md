@@ -1122,6 +1122,32 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 
 ---
 
+### Experiment 067: Partial RoPE 25% (Discard)
+
+**Hypothesis**: Apply RoPE to only 25% of head dimensions (16 of 64), freeing 75% for position-invariant content matching. Top-3 team reports -0.002 BPB at longer seq_len.
+
+**Config**: Best config (exp_063 baseline with LeakyReLU(0.5)²) + `PARTIAL_ROPE_FRAC=0.25`. Code change: in apply_rotary_emb, only rotate x[..., :partial_dim].
+
+**What happened**:
+- Pre-quant val_bpb=**1.6213** at step 697 — within noise of exp_063 baseline (1.6190).
+- Int8+zlib val_bpb=**1.6240** — **+0.0025 BPB** vs best (1.6215). DISCARD.
+- 697 steps at ~862ms/step. Artifact: **13,073,493 bytes (~13.1MB)**.
+
+**Analysis**:
+- At seq_len=1024, every position matters. RoPE enables position-dependent attention patterns (recency bias, periodic patterns) that the model actively uses. Removing positional encoding from 75% of head dimensions deprives the model of this positional capability without providing sufficient compensating content-matching benefit.
+- The pre-quant result (1.6213 vs 1.6190 = +0.0023) confirms the regression is in training quality, not quantization. The quant gap (+0.0027) is normal.
+- This differs from longer-context models (seq_len=4K+) where many attention patterns genuinely are position-invariant. At seq_len=1024, the model needs position information across all dimensions to learn fine-grained positional patterns in the relatively short context window.
+- The top-3 team's reported -0.002 BPB was likely at longer seq_len where the benefit of position-free content matching outweighs the cost of reduced positional resolution.
+
+**Decision**: **DISCARD**. Full RoPE is better at seq_len=1024.
+
+**Learnings**:
+- Full RoPE is optimal at seq_len=1024. Partial RoPE (25%) gives +0.0025 BPP regression.
+- Short sequences need position information everywhere — the 1024-token context is short enough that position-dependent patterns (recency, periodicity) are useful across all attention dimensions.
+- Partial RoPE is a longer-context technique. At seq_len=4K+, more attention patterns become genuinely position-invariant, and the content-matching benefit of position-free dimensions may outweigh the cost. Not worth revisiting unless we move to longer sequences.
+
+---
+
 > **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---

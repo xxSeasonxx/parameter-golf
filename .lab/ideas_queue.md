@@ -41,12 +41,8 @@ Run these in order. Each = one commit per program.md.
 ### ~~Experiment 066: XSA on Decoder Layers~~ COMPLETED -- DISCARD
 **Result**: val_bpb=1.6222, +0.0007 BPB (neutral). Self-exclusion removes 1/1024 context — too small at 10L. No speed penalty from custom mask. Worth trying on H100 with 11L+ where deeper layers benefit more from pure-context signals.
 
-### Experiment 067: Partial RoPE (25% dims) [KNOWN, ZERO COST]
-**What**: Apply RoPE to first 16 of 64 head dimensions only. Remaining 48 dims attend without positional bias.
-**Hypothesis**: Many patterns are position-invariant. Partial RoPE frees 75% of attention dimensions for pure content matching. Top-3 team reports -0.002 BPB.
-**Code change**: In apply_rotary_emb, only rotate x[..., :partial_dim]. Add PARTIAL_ROPE_FRAC env var.
-**Run**: Best config + PARTIAL_ROPE_FRAC=0.25.
-**Expect**: -0.001 to -0.002 BPB.
+### ~~Experiment 067: Partial RoPE (25% dims)~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6240, +0.0025 BPB. At seq_len=1024, full RoPE is better — every position matters for short sequences. Partial RoPE may help at longer seq_len (4K+) where more attention patterns are position-invariant.
 
 ---
 

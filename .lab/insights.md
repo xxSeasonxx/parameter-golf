@@ -9,7 +9,7 @@ commit: e8addc5
 val_bpb: 1.6215 (Apple Silicon, 10L, asymmetric MLP 2x/4x, LeakyReLU(0.5)², GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_063_leakyrelu_med.txt
-next_exp: 067
+next_exp: 068
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -32,6 +32,7 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 - **4 KV heads is optimal for 8Q heads**: NUM_KV_HEADS=2 (exp_045) is worse on both BPB (+0.003) and compression (3.64x vs 3.85x, 14.0MB vs 13.1MB despite fewer params). Fewer KV heads produce less regular weight patterns → worse zlib. The speed gain (830ms vs 848ms, +15 steps) doesn't compensate. Don't reduce KV heads below 4.
 - **LeakyReLU(0.5)² >> relu² [KNOWN, LARGE WIN]**: exp_063 val_bpb=1.6215, -0.0084 BPB vs relu² baseline (1.6299). Largest non-batch/non-clip win. The 0.5 negative slope preserves 50% of gradient flow for x<0, eliminating dead neurons. Squaring still provides sparsity (0.5²=0.25 on negative side). With vocab=1024 and tied embeddings, every neuron's capacity matters — dead neurons from relu² permanently waste MLP capacity. Pre-quant also improved (1.6190 vs 1.6270), confirming genuine training improvement not quantization artifact. Zero overhead. The change is in code, not env vars.
 - **XSA (Exclusive Self Attention) is neutral on Mac 10L [KNOWN, KILLED ON MAC]**: exp_066 XSA on last 3 decoder layers gives +0.0007 BPB (within noise). Self-exclusion removes 1/1024 (~0.1%) of context per position — too small for the deduplication benefit to manifest. No speed penalty (custom mask runs as fast as fused causal kernel). Worth trying on H100 with 11L+ where deeper layers benefit more from pure-context signals.
+- **Full RoPE is optimal at seq_len=1024 [KNOWN, KILLED ON MAC]**: exp_067 Partial RoPE (25% of head dims) gives +0.0025 BPB. At seq_len=1024, every position matters — RoPE enables position-dependent attention patterns (recency bias, periodic patterns) that the model needs for short sequences. Removing positional encoding from 75% of dims deprives the model of this capability without providing compensating content-matching benefit. This differs from longer-context models (seq_len=4K+) where many attention patterns genuinely are position-invariant. Don't reduce RoPE coverage at seq_len=1024.
 - **LOGIT_SOFTCAP=30.0 is optimal**: exp_047 softcap=15.0 is worse (+0.006 BPB). Tighter clamping constrains confident predictions for common tokens. Softcap regulates prediction confidence, not weight magnitude — doesn't affect compressibility. Don't touch.
 
 ## Optimization
