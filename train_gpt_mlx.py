@@ -90,6 +90,9 @@ class Hyperparameters:
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
     freq_skip_gating: bool = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
     freq_skip_window: int = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
+    # Partial RoPE: fraction of head dims to apply rotary embeddings to.
+    # 0.0 = full RoPE (all dims). 0.25 = 25% of dims get position info.
+    partial_rope_frac: float = float(os.environ.get("PARTIAL_ROPE_FRAC", 0.0))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -344,6 +347,7 @@ class CausalSelfAttention(nn.Module):
         num_kv_heads: int,
         rope_base: float,
         qk_gain_init: float,
+        partial_rope_frac: float = 0.0,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -363,7 +367,11 @@ class CausalSelfAttention(nn.Module):
         self.q_gain = mx.ones((num_heads,), dtype=mx.float32) * qk_gain_init
         # MLX provides nn.RoPE as a built-in module (PyTorch version uses a custom implementation).
         # traditional=False selects the "non-interleaved" / GPT-NeoX style rotation.
-        self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
+        # Partial RoPE: only rotate first N dims, rest attend without positional bias.
+        rope_dims = self.head_dim
+        if partial_rope_frac > 0:
+            rope_dims = max(int(self.head_dim * partial_rope_frac) // 2 * 2, 2)  # round to even
+        self.rope = nn.RoPE(rope_dims, traditional=False, base=rope_base)
         self.scale = self.head_dim ** -0.5
 
     def __call__(self, x: mx.array) -> mx.array:
@@ -405,11 +413,13 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
+        partial_rope_frac: float = 0.0,
     ):
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
         self.mlp_norm = RMSNormNoWeight()
-        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
+        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
+                                         partial_rope_frac=partial_rope_frac)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
@@ -432,7 +442,7 @@ class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
                  qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
-                 mlp_mult_asymmetric: str = ""):
+                 mlp_mult_asymmetric: str = "", partial_rope_frac: float = 0.0):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -457,7 +467,8 @@ class GPT(nn.Module):
         else:
             layer_mlp_mults = [mlp_mult] * num_layers
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, layer_mlp_mults[i], rope_base, qk_gain_init)
+            Block(dim, num_heads, num_kv_heads, layer_mlp_mults[i], rope_base, qk_gain_init,
+                  partial_rope_frac=partial_rope_frac)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -1141,6 +1152,7 @@ def main() -> None:
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
+        partial_rope_frac=args.partial_rope_frac,
     )
     opt = SplitOptimizers(model, args)
 
