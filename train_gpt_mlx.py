@@ -391,8 +391,7 @@ class MLP(nn.Module):
         self.proj = CastedLinear(hidden, dim)
 
     def __call__(self, x: mx.array) -> mx.array:
-        x = self.fc(x)
-        x = mx.where(x > 0, x, 0.5 * x)  # LeakyReLU(0.5) — preserves negative gradient flow
+        x = nn.gelu(self.fc(x))  # GELU — smooth Gaussian gating, no dead neurons
         return self.proj(x * x)
 
 
