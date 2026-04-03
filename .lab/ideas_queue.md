@@ -46,6 +46,9 @@ Run these in order. Each = one commit per program.md.
 ### ~~Experiment 069: LeakyReLU(0.7)² — higher negative slope~~ COMPLETED -- DISCARD
 **Result**: val_bpb=1.6231, +0.0016 BPB. Slope 0.7 reduces sparsity too much (0.7²=0.49 on negatives vs 0.5²=0.25). Full activation slope sweep: ReLU²(1.6299) < LeakyReLU(0.5)²(**1.6215**) > LeakyReLU(0.7)²(1.6231) > GELU²(1.6373). Slope 0.5 is the sweet spot. Activation exploration KILLED.
 
+### ~~Experiment 070: Wider Model MODEL_DIM=544~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6446, +0.023 BPB. 27.2M params (+13%) but 1018ms/step (+19%), only 590 steps vs 700. Step speed dominates capacity on Apple Silicon. Matches 11L finding. Model width increases KILLED for Mac — reserve for H100 where step time is batch-dominated.
+
 ---
 
 ## Backlog: Not Yet Run (low priority)

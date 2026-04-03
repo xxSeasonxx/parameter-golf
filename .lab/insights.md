@@ -9,7 +9,7 @@ commit: e8addc5
 val_bpb: 1.6215 (Apple Silicon, 10L, asymmetric MLP 2x/4x, LeakyReLU(0.5)², GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_063_leakyrelu_med.txt
-next_exp: 070
+next_exp: 071
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -25,6 +25,7 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 
 - **10 layers > 9 layers**: ~0.05 BPB. Extra layer adds ~1.2MB artifact.
 - **11 layers worse on Apple Silicon**: Better per-step (~0.04 BPB at matched steps) but slower (~394ms vs ~352ms), fewer total steps. **Try on 8xH100.**
+- **MODEL_DIM=544 worse on Apple Silicon (KILLED)**: 27.2M params (+13%) but 1018ms/step (+19%), only 590 steps (-16% vs 700). val_bpb=1.6446 (+0.023). Step speed dominates capacity on Mac. Compute scaling is super-linear in dim on Apple Silicon. Kill width increases for Mac; reserve for H100 where step time is batch-dominated.
 - **Frequency-decomposed skip gating [ORIGINAL]**: Decompose U-Net skip signals into low-freq (block means, W=32) and high-freq (residual) with independent per-dim gates. -0.010 BPB. Minimal overhead (~2ms/step). Window size W=16 vs W=32 makes no difference (exp_044: 1.6318 vs 1.6311). Robust to window size; W=32 is fine.
 - **MLP_MULT=3 > MLP_MULT=2**: -0.003 BPP. 24.1M params vs 18.9M. Artifact 12.9MB (3.1MB headroom). Nearly identical step time (~852ms vs ~845ms). Free capacity win.
 - **Asymmetric MLP (2x encoder, 4x decoder) > uniform MLP3x**: -0.001 BPB. Same 24.1M params, slightly faster (848ms vs 855ms), slightly smaller artifact (13.1MB vs 13.2MB). Decoder layers need more MLP capacity for token prediction. Free architectural win.
@@ -74,6 +75,7 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 - **Batch=16k with MLP3x is too small**: val_bpb=1.6692 despite 937 steps. Gradient quality dominates.
 - **Batch=32k with MLP3x is too slow**: val_bpb=1.6582, only 552 steps at 1087ms/step.
 - **11L+MLP3x too heavy**: val_bpb=1.6757, 645 steps at 931ms/step. Artifact 13.8MB.
+- **dim=544 too slow on Mac (KILLED)**: val_bpb=1.6446 (+0.023 BPB), 590 steps at 1018ms/step vs 700 at 855ms. 13% more params, 16% fewer steps = net loss. Apple Silicon compute scales super-linearly with dim. Kill width increases for Mac.
 - **Warmdown QAT (ramping strength) is too aggressive**: exp_036 val_bpb=1.6907 (+0.057). QAT noise fights warmdown convergence. Quant gap closes to 0.0002 BPB (mechanism works!) but overall BPB suffers badly. **Fixed by exp_051**: pre-warmdown QAT (lr_mul >= 0.8) avoids the convergence-critical warmdown phase entirely.
 - **Depth-recurrent warmdown is KILLED**: exp_053 depth recurrence (alpha=0.1, layers 2,3,4, ramping during warmdown) hurts BPB +0.008 for only -0.2MB artifact savings (12.9MB vs 13.1MB). Even gentle nudging during warmdown interferes with convergence — the warmdown phase is too sensitive for any auxiliary loss. The compression benefit (layer weight similarity) doesn't justify the quality cost. Kill depth recurrence as a warmdown technique. Might be viable as a pre-warmdown technique (like QAT), but the expected compression gain (~0.2MB) is too small to justify the complexity.
 - **Pre-warmdown QAT is a regularizer [OUR TWIST]**: exp_051 val_bpb=1.6299 (NEW BEST, -0.0010). Constant strength=0.1, every 10 steps, stop when lr_mul < 0.8. Pre-quant BPB improved from 1.6284 to 1.6270 (best ever) — the improvement is from better training, NOT quant gap reduction (gap unchanged at ~0.003 for int8). Int8 noise acts as structured regularization during the main training phase. Zero overhead (<2ms/step). Fixes exp_036's failure by separating QAT from warmdown.

@@ -1235,6 +1235,45 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 
 ---
 
+### Experiment 070: Wider Model MODEL_DIM=544 (Discard)
+
+**Hypothesis**: Wider model (dim=544, 27.2M params vs dim=512, 24.1M params) uses the 2.9MB artifact headroom for more capacity. 13% more parameters within budget.
+
+**Config**: Pure env-var change: `MODEL_DIM=544`. All else identical to exp_063 best config (LeakyReLU(0.5)², 10L, asymmetric MLP 2,4, etc.).
+
+**What happened**:
+- Pre-quant val_bpb=**1.6411** at step 590 — worse than best pre-quant (1.6190 from exp_063).
+- Int8+zlib val_bpb=**1.6446** — **+0.0231 BPB worse** than best (1.6215). Significant regression.
+- 590 steps at ~1018ms/step (vs ~855ms for dim=512). Artifact: **14,102,619 bytes (14.1MB)** — within budget but using most headroom.
+- Compression ratio: 3.86x (consistent with dim=512).
+
+**Analysis**:
+- The wider model is **16% slower per step** (1018ms vs 855ms), resulting in **16% fewer steps** (590 vs ~700). On Apple Silicon where wallclock is the binding constraint, this step count reduction dominates the capacity increase.
+- 13% more parameters but 16% fewer optimization steps = net negative. The model doesn't have enough training iterations to exploit the additional capacity.
+- This exactly matches the 11L finding (exp_015): 11L was better per-step but worse overall due to slower steps (394ms vs 352ms, fewer total steps). The pattern is consistent — on Apple Silicon, step speed dominates model capacity.
+- The artifact (14.1MB) confirms the wider model fits within budget, so the failure is purely a training dynamics issue, not a size constraint.
+- Pre-quant regression (+0.022 vs baseline) confirms the damage is in training quality, not quantization. The quant gap (+0.0035) is slightly larger than normal (~0.003), consistent with a less-converged model having slightly less regular weights.
+
+**Step time breakdown**:
+| Config | dim | Params | ms/step | Steps (600s) | val_bpb |
+|--------|-----|--------|---------|------------|---------|
+| 10L dim=512 | 512 | 24.1M | ~855ms | ~700 | **1.6215** |
+| 10L dim=544 | 544 | 27.2M | ~1018ms | 590 | 1.6446 |
+| 11L dim=512 | 512 | 26.3M | ~931ms | 645 | 1.6757* |
+
+*exp_015 was pre-activation-improvement; comparable pattern
+
+**Decision**: **DISCARD**. Kill model width increases for Apple Silicon experiments. The step time penalty outweighs the capacity gain.
+
+**Learnings**:
+- On Apple Silicon, step speed dominates model capacity. 16% fewer steps hurts more than 13% more parameters helps.
+- This matches the 11L finding: capacity increases that slow steps are net negative on Apple Silicon where wallclock is the binding constraint.
+- MODEL_DIM=544 produces 1018ms/step (19% slower than dim=512's 855ms). The compute scaling is super-linear in dim on Apple Silicon (dim increases 6.25%, step time increases 19%).
+- Model width increases should be reserved for H100 where step time is batch-dominated (93ms/step), not compute-dominated. On H100, dim=544 would likely add <5ms/step while providing 13% more capacity.
+- Kill model width experiments on Mac. The dim=512 / 10L / MLP-asymmetric(2,4) configuration is the optimal capacity allocation for Apple Silicon's wallclock constraint.
+
+---
+
 > **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---

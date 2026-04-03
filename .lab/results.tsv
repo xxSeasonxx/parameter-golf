@@ -50,3 +50,4 @@ f06072b	1.6240	13073493	discard	exp_067: Partial RoPE (25% dims) — +0.0025 BPB
 79d73da	1.6238	13127542	discard	exp_065: 3-band freq skip gating — +0.0023 BPB, ultra-low band redundant with 2-band
 b783344	1.6373	12652167	discard	exp_068: GELU² activation — +0.016 BPB, Gaussian gating kills negative gradient flow vs LeakyReLU(0.5)²
 d1366f9	1.6231	13285284	discard	exp_069: LeakyReLU(0.7)² — +0.0016 BPB, slope 0.5 is optimal. Activation sweep CLOSED
+e8addc5	1.6446	14102619	discard	exp_070: MODEL_DIM=544 (27.2M params) — +0.023 BPB, wider model too slow for Mac (590 vs 700 steps, 1018ms/step)
