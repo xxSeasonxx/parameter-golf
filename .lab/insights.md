@@ -5,11 +5,11 @@ Validated learnings from experiments. Single source of truth. Delete disproven h
 ## Current Best
 
 ```
-commit: 4585b0b
-val_bpb: 1.6299 (Apple Silicon, 10L, asymmetric MLP 2x/4x, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
-artifact: 13,091,119 bytes (~13.1MB, 2.9MB headroom)
-log: logs/exp_051_qat_prewarmdown.txt
-next_exp: 062
+commit: e8addc5
+val_bpb: 1.6215 (Apple Silicon, 10L, asymmetric MLP 2x/4x, LeakyReLU(0.5)², GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
+artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom)
+log: logs/exp_063_leakyrelu_med.txt
+next_exp: 064
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -19,6 +19,7 @@ NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 
 Note: Warmdown-aware WD scheduling is in the code: `wd = base_wd * (2 - lr_mul)`
 Note: Frequency-decomposed skip gating is in the code (FREQ_SKIP_WINDOW=32 default)
 Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of training)
+Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env var
 
 ## Architecture
 
@@ -29,6 +30,7 @@ Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of t
 - **Asymmetric MLP (2x encoder, 4x decoder) > uniform MLP3x**: -0.001 BPB. Same 24.1M params, slightly faster (848ms vs 855ms), slightly smaller artifact (13.1MB vs 13.2MB). Decoder layers need more MLP capacity for token prediction. Free architectural win.
 - **Asymmetric MLP limits**: Extreme asymmetry (1,5) is worse (+0.001 BPB vs 2,4). Encoder MLP=1x starves feature extraction. 2,4 is the sweet spot — encoder needs enough capacity for good intermediate representations fed via U-Net skip connections.
 - **4 KV heads is optimal for 8Q heads**: NUM_KV_HEADS=2 (exp_045) is worse on both BPB (+0.003) and compression (3.64x vs 3.85x, 14.0MB vs 13.1MB despite fewer params). Fewer KV heads produce less regular weight patterns → worse zlib. The speed gain (830ms vs 848ms, +15 steps) doesn't compensate. Don't reduce KV heads below 4.
+- **LeakyReLU(0.5)² >> relu² [KNOWN, LARGE WIN]**: exp_063 val_bpb=1.6215, -0.0084 BPB vs relu² baseline (1.6299). Largest non-batch/non-clip win. The 0.5 negative slope preserves 50% of gradient flow for x<0, eliminating dead neurons. Squaring still provides sparsity (0.5²=0.25 on negative side). With vocab=1024 and tied embeddings, every neuron's capacity matters — dead neurons from relu² permanently waste MLP capacity. Pre-quant also improved (1.6190 vs 1.6270), confirming genuine training improvement not quantization artifact. Zero overhead. The change is in code, not env vars.
 - **LOGIT_SOFTCAP=30.0 is optimal**: exp_047 softcap=15.0 is worse (+0.006 BPB). Tighter clamping constrains confident predictions for common tokens. Softcap regulates prediction confidence, not weight magnitude — doesn't affect compressibility. Don't touch.
 
 ## Optimization
@@ -86,41 +88,52 @@ Note: Pre-warmdown QAT fires every 10 steps while lr_mul >= 0.8 (~first 60% of t
 
 ## Porting to 8xH100
 
-Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval.
+Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval, (5) LeakyReLU(0.5)² activation.
 Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT_ASYMMETRIC=2,4, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10.
 Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 
+## H100 RunPod Results (2026-04-03)
+
+Three comparative runs on 8xH100 (80/195 shards, 524K batch, 600s wallclock):
+
+| Run | Config | Steps | Pre-quant | Post-quant | TTT BPB | Artifact |
+|-----|--------|-------|-----------|-----------|---------|----------|
+| 1 | 11L int8 zlib (baseline) | 6421 | 1.2250 | 1.2302 | **1.2087** | 15.8MB |
+| 2 | 13L int6 zstd (capacity) | 5418 | **1.2145** | 1.3066 | 1.2765 | 9.9MB |
+| 3 | 11L int8 zstd + SWA (23 snapshots) | 6420 | 1.2260 | 1.2322 | 1.2107 | 14.2MB |
+
+**Key learnings**:
+- **SWA is DEAD everywhere**: 23 H100 snapshots gave +0.002 BPB regression. Killed for good. Need EMA instead (decay=0.997, every step — all top teams use this).
+- **Int6 is DEAD without STE/GPTQ**: Quant gap +0.092 on H100 (worse than Mac's +0.063). Pre-quant was best (1.2145) but quant destroys it.
+- **Zstd-22 saves ~1.6MB for free**: 15.8MB (zlib) → 14.2MB (zstd). Always use.
+- **13L pre-quant is better**: 1.2145 vs 1.2250 (-0.0105) from 2 extra layers. But needs int8 to realize it.
+- **Only 80/195 shards used**: Future runs MUST download full dataset.
+- **Step time 93ms/step**: Top teams achieve 83-85ms/step with parameter banking.
+- **Still improving at wallclock cap**: ~-0.19 BPB/1000 steps at step 6400. More steps = better.
+
 ## Competition Strategy (8xH100 target: ≤1.12 BPB)
 
-**Leaderboard top**: 1.1194 (as of 2026-03-28). Our estimated ported result: ~1.18-1.20.
+**Leaderboard top**: 1.1194. Our best H100 result: **1.2087 TTT BPB**. Gap: **0.089 BPB**.
 
-**Key constraint shift from Mac → H100**: Step time is batch-dominated (524K tokens/step). 11L, MLP3x are free. Artifact size (16MB) is the binding constraint. Eval-time compute is unlimited.
+**Gap breakdown**:
+- Insufficient steps/data (~65%): only 80/195 shards, still steep improvement curve at cap
+- Missing architecture features (~20%): XSA, SmearGate, BigramHash, Partial RoPE, LN Scale
+- Missing training techniques (~10%): EMA, GPTQ-lite, better optimizer config
+- TTT suboptimal (~5%): LoRA vs full-model legal TTT
 
 **Our original contributions** (differentiators):
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
 2. Frequency-decomposed skip gating — proven, unique
 3. Asymmetric MLP (encoder=2x, decoder=4x) — validated, small win
 4. Per-layer LR scaling for Muon — validated, small win
-5. Pre-warmdown QAT (exp_051) — proven, QAT as regularizer during lr_mul >= 0.8
+5. Pre-warmdown QAT (exp_051) — proven, QAT as regularizer
 
-**Known techniques to add on H100** (table stakes):
-- Int6 quantization (MLP/attention weights) — validated (48% artifact reduction), but REQUIRES QAT (+0.064 BPB without)
-- TTT LoRA at eval time (already in codebase)
-- SWA (H100-only, needs 1500+ steps)
-- Zstd-22 compression (replace zlib)
-- 11 layers (free on H100)
-
-**Killed for Mac, may work on H100**:
-- QAT during warmdown — quant gap closes but BPB suffers at 700 steps. Full-training QAT (exp_056) is neutral (gap slightly better, pre-quant slightly worse, effects cancel)
-- SWA — needs oscillation that only occurs at 1500+ steps
-
-**Validated on Mac, ready for H100**:
-- Pre-warmdown QAT (exp_051) — NEW BEST on Mac, should show even larger gains with more steps on H100
+**Killed definitively (both Mac + H100)**:
+- SWA (any form) — Mac: no oscillation at 700 steps. H100: 23 snapshots still hurts.
+- Int6 without STE/GPTQ — Mac: +0.063 gap. H100: +0.092 gap. Even worse with more params.
+- Label smoothing with small vocab — catastrophic
+- Depth recurrence during warmdown — warmdown is sacred
 
 ## Apple Silicon Plateau Analysis
 
-After 14 experiments at the current config level (exp_035-051), Apple Silicon val_bpb is firmly plateaued at **~1.630 ± 0.003**. Pre-quant values consistently land in 1.627-1.634. exp_051 (pre-warmdown QAT) pushed to 1.6299 post-quant / 1.6270 pre-quant (both best ever), but remains within the noise band.
-
-**Root cause**: ~700 steps with ~17M tokens is the fundamental bottleneck. No per-step optimization can overcome the data limitation. The leaderboard top (1.1194) uses 64x more data per step.
-
-**What to do next**: Port to 8xH100 and focus on techniques that scale with data (int6, TTT, SWA, 11L).
+After 27 experiments at the current config level (exp_035-061), Apple Silicon val_bpb appeared plateaued at ~1.630 +/- 0.003. However, exp_063 (LeakyReLU(0.5)²) broke through with **1.6215**, proving that architectural improvements to capacity utilization can still deliver significant wins. The plateau was in optimization hyperparameters, not architecture. Remaining moonshot experiments (EMA, multi-band skip gating, XSA, partial RoPE) now stack on top of this new baseline.

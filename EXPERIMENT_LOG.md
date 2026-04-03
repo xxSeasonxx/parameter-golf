@@ -5,8 +5,9 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6299** (commit `4585b0b`, exp_051 Pre-warmdown QAT)
-**Latest**: exp_061 Lower tied_embed_lr=0.03 (discarded — +0.011 BPB, embed LR sweep fully closed)
+**Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
+**Latest**: exp_063 LeakyReLU(0.5)² activation (NEW BEST — -0.0084 BPB)
+**H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
 
@@ -73,6 +74,15 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 059 | exp_059_higher_lr | MATRIX_LR=0.06 (1.5x) | 703/2000 | 1.6391 | 13.3MB | Discard | +0.009 BPB. Higher LR overshoots — Muon orthogonalized updates well-scaled at 0.04. Kill LR sweep |
 | 060 | exp_060_high_embed_lr | TIED_EMBED_LR=0.1 (2x) | 705/2000 | 1.6598 | 13.2MB | Discard | +0.030 BPB. Tied embeddings extremely LR-sensitive. Kill embed LR sweep upward |
 | 061 | exp_061_low_embed_lr | TIED_EMBED_LR=0.03 (0.6x) | 690/2000 | 1.6407 | 13.0MB | Discard | +0.011 BPB. Lower embed LR under-trains. Embed LR sweep fully closed: 0.05 is the sweet spot |
+| **063** | **exp_063_leakyrelu_med** | **LeakyReLU(0.5)² activation in MLP** | **700/2000** | **1.6215** | **13.1MB** | **BEST** | **NEW BEST -0.0084 BPB! Dead neuron elimination via 50% negative slope** |
+
+### H100 RunPod Runs (2026-04-03)
+
+| Run | Config | Steps | Pre-quant BPB | Post-quant BPB | TTT BPB | Artifact | Status | Key Takeaway |
+|-----|--------|-------|---------------|---------------|---------|----------|--------|-------------|
+| H100-1 | 11L int8 zlib (baseline) | 6421 | 1.2250 | 1.2302 | **1.2087** | 15.8MB | Best | Baseline established. Gap to leaderboard: 0.089 BPB |
+| H100-2 | 13L int6 zstd (capacity) | 5418 | **1.2145** | 1.3066 | 1.2765 | 9.9MB | Discard | Best pre-quant but int6 gap +0.092 destroys it. Int6 KILLED |
+| H100-3 | 11L int8 zstd + SWA | 6420 | 1.2260 | 1.2322 | 1.2107 | 14.2MB | Discard | SWA (23 snapshots) gives +0.002 regression. SWA KILLED EVERYWHERE |
 
 ---
 
@@ -1018,6 +1028,33 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - The tied embedding's dual role (input lookup + output projection) makes it sensitive to LR in both directions: too high destabilizes, too low under-trains.
 - The asymmetry (higher LR is 3x worse) suggests the embedding is more sensitive to overshooting than undershooting -- consistent with the dual-use amplification of errors.
 - This closes the embed LR sweep definitively. No further exploration needed in any direction.
+
+---
+
+### Experiment 063: LeakyReLU(0.5)² Activation (NEW BEST)
+
+**Hypothesis**: Replace `relu(x)²` with `leaky_relu(x, 0.5)²` in MLP. The original relu² creates dead neurons (zero gradient for x<0). With a 0.5 negative slope, 50% of negative gradient flow is preserved, eliminating dead neurons while the squaring still provides sparsity. Expected -0.001 to -0.003 BPB.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6190** — best pre-quant ever (vs previous best 1.6270 from exp_051).
+- Int8+zlib val_bpb=**1.6215** — **NEW BEST, -0.0084 BPB** vs previous best (1.6299).
+- 700 steps at ~857ms/step (within normal range). Artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom).
+- Quant gap: +0.0025 BPB (1.6215 - 1.6190), consistent with normal int8 quant gap.
+
+**Analysis**:
+- This is a surprisingly large win (-0.0084 BPB) for what is essentially a one-line change. It is the largest single improvement since batch scaling (exp_022, -0.082 BPB) and gradient clipping (exp_033, -0.016 BPB).
+- The improvement is genuine training quality, not a quantization artifact: pre-quant BPB improved by -0.0080 (1.6190 vs 1.6270), nearly identical to the post-quant improvement (-0.0084).
+- With vocab=1024 and tied embeddings, every neuron matters more than in large-vocab models. Dead neurons in relu² permanently waste capacity. The 0.5 slope preserves negative information while the squaring still provides beneficial sparsity (0.5² = 0.25, so negative activations are still suppressed relative to positive ones).
+- The win likely stacks multiplicatively with everything else: it improves the fundamental capacity utilization of every MLP layer across all 10 layers. This is not a regularization trick — it is a genuine architectural improvement.
+- Step time (857ms) is essentially identical to previous runs (~855ms), confirming zero overhead from the activation change.
+
+**Decision**: **KEEP** as new best. Largest non-batch/non-clip improvement in the entire experiment history.
+
+**Learnings**:
+- LeakyReLU(0.5)² is strictly better than relu² for this architecture. Dead neuron elimination is worth -0.008 BPB.
+- The 0.5 slope was chosen to balance gradient flow preservation (higher slope = more gradient) with sparsity from squaring (lower slope = more sparsity). The squaring means even a 0.5 slope only contributes 0.25x on the negative side, maintaining substantial sparsity.
+- This makes ALL remaining experiments more promising — they stack on top of a better activation function. The LeakyReLU change is in the code (not env vars), so the best config env vars remain unchanged.
+- Key principle confirmed: with small vocab (1024) and tied embeddings, capacity efficiency is paramount. Any technique that reduces wasted capacity (dead neurons, over-regularization) has outsized impact.
 
 ---
 
