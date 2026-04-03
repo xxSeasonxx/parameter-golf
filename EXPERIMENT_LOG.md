@@ -1174,6 +1174,33 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 
 ---
 
+### Experiment 068: GELU² Activation (Discard)
+
+**Hypothesis**: GELU² activation provides smooth Gaussian gating, potentially better than LeakyReLU(0.5)² which uses a hard kink at x=0. GELU's smooth transition might allow better gradient flow during training.
+
+**Config**: Best config (exp_063 baseline) with GELU² replacing LeakyReLU(0.5)² in MLP. Code change: replace `leaky_relu(x, neg_slope=0.5) ** 2` with `gelu(x) ** 2`.
+
+**What happened**:
+- Pre-quant val_bpb=**1.6345** at step 687 — worse than exp_063 baseline (1.6190).
+- Int8+zlib val_bpb=**1.6373** — **+0.0158 BPB** vs best (1.6215). DISCARD.
+- 687 steps at ~873ms/step (slower than LeakyReLU's ~855ms). Artifact: **12,652,167 bytes (~12.7MB)** — smaller than usual due to GELU producing more compressible weight patterns.
+
+**Analysis**:
+- GELU² is significantly worse because GELU's Gaussian gating kills negative inputs exponentially (GELU(x) approaches 0 for x < -2), while LeakyReLU(0.5) preserves 50% of the input linearly. With squaring already providing sparsity (both activations square to provide the nonlinearity), the activation's role is to control negative gradient flow.
+- LeakyReLU(0.5)² preserves 25% of gradient magnitude for negative inputs (0.5² = 0.25), while GELU² provides essentially zero gradient for x < -2. This means GELU² creates dead zones similar to ReLU², just with a smoother boundary.
+- The smaller artifact (12.7MB vs 13.1MB) confirms GELU produces more regular/compressible weight patterns — but the quality cost is far too high.
+- Pre-quant regression (+0.0155 vs baseline) confirms the damage is in training quality, not quantization.
+
+**Decision**: **DISCARD**. LeakyReLU(0.5)² remains optimal.
+
+**Learnings**:
+- Negative gradient preservation is the key mechanism for squared activations, not smooth gating. LeakyReLU(0.5)² > GELU² > ReLU² forms a clear ordering by how much negative gradient flow is preserved (50% > ~0% smooth > 0% hard).
+- With vocab=1024 and tied embeddings, every neuron's capacity matters. Activations that kill negative inputs (GELU, ReLU) permanently waste MLP capacity through dead neurons/zones.
+- GELU's smoothness is not a benefit when squaring is already applied — the squaring operation already smooths the gradient landscape. The kink in LeakyReLU at x=0 is irrelevant after squaring.
+- This closes the activation exploration: LeakyReLU(0.5)² is optimal because it maximizes gradient flow while still providing sparsity via squaring.
+
+---
+
 > **Live state**: See `.lab/insights.md` (current best + learnings) and `.lab/ideas_queue.md` (what to try next). Those are the authoritative, always-up-to-date sources. This log is history.
 
 ---

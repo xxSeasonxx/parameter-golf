@@ -40,6 +40,9 @@ Run these in order. Each = one commit per program.md.
 ### ~~Experiment 067: Partial RoPE (25% dims)~~ COMPLETED -- DISCARD
 **Result**: val_bpb=1.6240, +0.0025 BPB. At seq_len=1024, full RoPE is better — every position matters for short sequences. Partial RoPE may help at longer seq_len (4K+) where more attention patterns are position-invariant.
 
+### ~~Experiment 068: GELU² Activation~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6373, +0.0158 BPB. GELU's Gaussian gating kills negative inputs exponentially, while LeakyReLU(0.5) preserves 50% linearly. With squaring providing sparsity, negative gradient preservation is the key mechanism — more flow is better. Activation exploration is CLOSED.
+
 ---
 
 ## Backlog: Not Yet Run (low priority)
