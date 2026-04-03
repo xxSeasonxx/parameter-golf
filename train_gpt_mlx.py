@@ -90,6 +90,8 @@ class Hyperparameters:
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
     freq_skip_gating: bool = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
     freq_skip_window: int = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
+    # Number of frequency bands for skip gating: 2 = lo/hi, 3 = ultra-lo/mid/hi
+    freq_skip_bands: int = int(os.environ.get("FREQ_SKIP_BANDS", 2))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -432,7 +434,7 @@ class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
                  qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
-                 mlp_mult_asymmetric: str = ""):
+                 mlp_mult_asymmetric: str = "", freq_skip_bands: int = 2):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -445,9 +447,12 @@ class GPT(nn.Module):
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.freq_skip_gating = freq_skip_gating
         self.freq_skip_window = freq_skip_window
+        self.freq_skip_bands = freq_skip_bands
         if freq_skip_gating:
             self.skip_lo_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
             self.skip_hi_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+            if freq_skip_bands >= 3:
+                self.skip_ulo_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         else:
             self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         # Per-layer MLP width: asymmetric allows different encoder/decoder widths
@@ -489,12 +494,25 @@ class GPT(nn.Module):
                 skip = skips.pop()
                 if self.freq_skip_gating:
                     W = self.freq_skip_window
-                    # Decompose: low-freq = block means, high-freq = residual
-                    s = skip.reshape(*skip.shape[:-1], -1, W)
-                    lo = mx.repeat(s.mean(axis=-1, keepdims=True), W, axis=-1).reshape(skip.shape)
-                    hi = skip - lo
-                    x = x + (self.skip_lo_weights[i].astype(x.dtype)[None, None, :] * lo +
-                             self.skip_hi_weights[i].astype(x.dtype)[None, None, :] * hi)
+                    if self.freq_skip_bands >= 3:
+                        # 3-band: ultra-low (W*4=128), mid (W=32), high (residual)
+                        W_ulo = W * 4
+                        s_ulo = skip.reshape(*skip.shape[:-1], -1, W_ulo)
+                        ulo = mx.repeat(s_ulo.mean(axis=-1, keepdims=True), W_ulo, axis=-1).reshape(skip.shape)
+                        resid = skip - ulo
+                        s_mid = resid.reshape(*resid.shape[:-1], -1, W)
+                        lo = mx.repeat(s_mid.mean(axis=-1, keepdims=True), W, axis=-1).reshape(skip.shape)
+                        hi = resid - lo
+                        x = x + (self.skip_ulo_weights[i].astype(x.dtype)[None, None, :] * ulo +
+                                 self.skip_lo_weights[i].astype(x.dtype)[None, None, :] * lo +
+                                 self.skip_hi_weights[i].astype(x.dtype)[None, None, :] * hi)
+                    else:
+                        # 2-band: low-freq = block means (W=32), high-freq = residual
+                        s = skip.reshape(*skip.shape[:-1], -1, W)
+                        lo = mx.repeat(s.mean(axis=-1, keepdims=True), W, axis=-1).reshape(skip.shape)
+                        hi = skip - lo
+                        x = x + (self.skip_lo_weights[i].astype(x.dtype)[None, None, :] * lo +
+                                 self.skip_hi_weights[i].astype(x.dtype)[None, None, :] * hi)
                 else:
                     x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skip
             x = self.blocks[self.num_encoder_layers + i](x, x0)
@@ -597,7 +615,7 @@ class SplitOptimizers:
         self.scalar_keys = [
             k
             for k, p in params.items()
-            if k in ("skip_weights", "skip_lo_weights", "skip_hi_weights") or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
+            if k in ("skip_weights", "skip_lo_weights", "skip_hi_weights", "skip_ulo_weights") or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
         ]
 
         self.muon = Muon(self.matrix_keys, params, args)
@@ -1141,6 +1159,7 @@ def main() -> None:
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
+        freq_skip_bands=args.freq_skip_bands,
     )
     opt = SplitOptimizers(model, args)
 
