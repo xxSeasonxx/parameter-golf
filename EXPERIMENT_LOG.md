@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: exp_063 LeakyReLU(0.5)² activation (NEW BEST — -0.0084 BPB)
+**Latest**: exp_064 EMA decay=0.997 (DISCARD — +0.22 BPB, window too wide for 689 steps)
 **H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
@@ -75,6 +75,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 060 | exp_060_high_embed_lr | TIED_EMBED_LR=0.1 (2x) | 705/2000 | 1.6598 | 13.2MB | Discard | +0.030 BPB. Tied embeddings extremely LR-sensitive. Kill embed LR sweep upward |
 | 061 | exp_061_low_embed_lr | TIED_EMBED_LR=0.03 (0.6x) | 690/2000 | 1.6407 | 13.0MB | Discard | +0.011 BPB. Lower embed LR under-trains. Embed LR sweep fully closed: 0.05 is the sweet spot |
 | **063** | **exp_063_leakyrelu_med** | **LeakyReLU(0.5)² activation in MLP** | **700/2000** | **1.6215** | **13.1MB** | **BEST** | **NEW BEST -0.0084 BPB! Dead neuron elimination via 50% negative slope** |
+| 064 | exp_064_ema | EMA decay=0.997 | 689/2000 | 1.8437 | 12.1MB | Discard | EMA window too wide for 689 steps (48% of training). Pre-EMA model was 1.6224 |
 
 ### H100 RunPod Runs (2026-04-03)
 
@@ -1055,6 +1056,41 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - The 0.5 slope was chosen to balance gradient flow preservation (higher slope = more gradient) with sparsity from squaring (lower slope = more sparsity). The squaring means even a 0.5 slope only contributes 0.25x on the negative side, maintaining substantial sparsity.
 - This makes ALL remaining experiments more promising — they stack on top of a better activation function. The LeakyReLU change is in the code (not env vars), so the best config env vars remain unchanged.
 - Key principle confirmed: with small vocab (1024) and tied embeddings, capacity efficiency is paramount. Any technique that reduces wasted capacity (dead neurons, over-regularization) has outsized impact.
+
+---
+
+### Experiment 064: EMA decay=0.997 (Discard)
+
+**Hypothesis**: Continuous EMA (decay=0.997) smooths per-step noise, improving final model quality. All top-4 competition teams use EMA. Unlike SWA (killed), EMA updates continuously and works with monotonic convergence.
+
+**Config**: Best config (exp_063 baseline with LeakyReLU(0.5)²) + EMA with decay=0.997, updated every step. EMA weights swapped in for eval/serialization.
+
+**What happened**:
+- Pre-EMA val_bpb=**1.6224** — close to exp_063 baseline (1.6215), confirming the underlying model trained well.
+- Post-EMA val_bpb=**1.8437** — **CATASTROPHIC +0.22 BPB regression**.
+- 689 steps at ~871ms/step. Artifact: 12,099,145 bytes (~12.1MB).
+
+**Root cause — EMA window too wide for short training**:
+- With decay=0.997, the effective averaging window is `1/(1-0.997) = 333 steps` = **48% of 689 total steps**.
+- EMA weights are dominated by early under-trained parameters from the first half of training.
+- The warmdown phase (which produces the final convergence) is heavily diluted by stale early weights.
+- Compare with H100 (6000+ steps): same decay gives a ~333-step window = ~5% of training, a reasonable smoothing window.
+
+**Scaling analysis**:
+| Platform | Steps | EMA window (decay=0.997) | Window/Total | Expected effect |
+|----------|-------|--------------------------|--------------|-----------------|
+| Mac (Apple Silicon) | ~700 | 333 | 48% | Catastrophic (confirmed) |
+| H100 | ~6000 | 333 | 5.5% | Should work (top teams confirm) |
+
+**Decision**: **DISCARD**. EMA is fundamentally incompatible with Apple Silicon's short training runs at decay=0.997. Reserve for H100 only, or use much higher decay on Mac (e.g., 0.98 for ~50-step window = 7% of training).
+
+**Learnings**:
+- EMA's effective window scales inversely with step count. For fixed decay, EMA is harmful when training duration is short.
+- On Mac with ~700 steps, decay=0.997 averages 48% of training — far too much. Need decay >= 0.98 for a reasonable ~7% window.
+- On H100 with 6000+ steps, decay=0.997 gives ~5.5% window — this is why all top teams use it successfully.
+- The pre-EMA model (1.6224) confirms the EMA overhead (~871ms vs ~848ms/step) is minor and the underlying training is unaffected.
+- EMA is now KILLED for Mac experiments. It joins SWA in the "weight averaging killed on Mac" category.
+- For H100 deployment, EMA (decay=0.997) remains a must-have.
 
 ---
 

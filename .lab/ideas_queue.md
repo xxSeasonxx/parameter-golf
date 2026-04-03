@@ -28,12 +28,8 @@ Run these in order. Each = one commit per program.md.
 ### ~~Experiment 063: LeakyReLU(0.5)²~~ COMPLETED -- NEW BEST
 **Result**: val_bpb=1.6215, -0.0084 BPB vs previous best (1.6299). Largest non-batch/non-clip win. Dead neuron elimination via 50% negative slope. Pre-quant 1.6190 (also best ever). All remaining experiments now stack on top of this win.
 
-### Experiment 064: EMA (decay=0.997) [KNOWN, REPLACES KILLED SWA]
-**What**: Maintain exponential moving average of model weights, updated every step. Use EMA weights for eval/serialization.
-**Hypothesis**: EMA smooths per-step noise continuously (unlike SWA's discrete snapshots). All top-4 teams use EMA. Our SWA failed because it needs oscillation; EMA works with monotonic convergence.
-**Code change**: After optimizer step, update `ema[k] = 0.997 * ema[k] + 0.003 * model[k]`. At serialization, swap in EMA weights.
-**Run**: Best config.
-**Expect**: -0.001 to -0.005 BPB. Note: exp_018 tried EMA warmdown blend (catastrophic) — that was a DIFFERENT approach (blending during warmdown). This is continuous EMA from start.
+### ~~Experiment 064: EMA (decay=0.997)~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.8437, +0.22 BPB. EMA window (333 steps) = 48% of 689 total steps — dominated by early under-trained weights. Pre-EMA model was 1.6224 (fine). **EMA killed on Mac.** Reserve for H100 where 6000+ steps make decay=0.997 reasonable (~5.5% window).
 
 ### Experiment 065: Multi-Band Skip Gating v2 (3 bands) [ORIGINAL, BUILDS ON OUR STRENGTH]
 **What**: Evolve freq-decomposed skip gating from 2 bands to 3: ultra-low (W=128), mid (W=32), high (residual).

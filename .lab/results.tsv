@@ -44,3 +44,4 @@ a040c35	1.6904	6938640	discard	exp_055: Strong int6 QAT (QAT_BITS=6, strength=0.
 5b61bdd	1.6598	13180922	discard	exp_060: TIED_EMBED_LR=0.1 (2x default 0.05) — +0.030 BPB, higher embed LR hurts. Adam's 0.05 is well-tuned for tied embeddings
 eb91b7d	1.6407	13029285	discard	exp_061: TIED_EMBED_LR=0.03 (0.6x default 0.05) — +0.011 BPP, lower embed LR under-trains. Embed LR sweep fully closed
 e8addc5	1.6215	13124539	keep	exp_063: LeakyReLU(0.5)² activation in MLP — NEW BEST (-0.0084 BPB)
+e1e9c19	1.8437	12099145	discard	exp_064: EMA decay=0.997 — +0.22 BPB, window too wide for 689 steps

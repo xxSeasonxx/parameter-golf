@@ -115,6 +115,10 @@ class Hyperparameters:
     qat_stop_lr_mul: float = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
     qat_every: int = int(os.environ.get("QAT_EVERY", 10))
 
+    # EMA: exponential moving average of model weights.
+    # decay=0 disables. Typical: 0.997. EMA weights used for eval/serialization.
+    ema_decay: float = float(os.environ.get("EMA_DECAY", 0.0))
+
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
     # stride=64 matches the competition's best evaluation strategy.
@@ -1144,6 +1148,11 @@ def main() -> None:
     )
     opt = SplitOptimizers(model, args)
 
+    # EMA state: shadow copy of all model parameters, updated every step.
+    ema_state: dict[str, mx.array] | None = None
+    if args.ema_decay > 0:
+        ema_state = {k: mx.array(v) for k, v in tree_flatten(model.state)}
+
     # ==============================================================================
     # COMPILED TRAIN / EVAL FUNCTIONS (MLX)
     # ==============================================================================
@@ -1321,6 +1330,12 @@ def main() -> None:
             if qat_updates:
                 model.update(tree_unflatten(list(qat_updates.items())))
 
+        # EMA update: blend current model weights into the shadow copy.
+        if ema_state is not None:
+            decay = args.ema_decay
+            for k, v in tree_flatten(model.state):
+                ema_state[k] = decay * ema_state[k] + (1.0 - decay) * v
+
         # mx.synchronize() is the timing fence — everything above is lazy/async. This blocks
         # until all Metal GPU work finishes, giving accurate wall-clock step timing.
         mx.synchronize()
@@ -1343,6 +1358,10 @@ def main() -> None:
     # We always write a raw artifact and a quantized artifact, then validate the
     # quantized roundtrip directly by loading the dequantized tensors back into the
     # model and running one final validation pass.
+    # Swap in EMA weights for serialization and final eval if enabled.
+    if ema_state is not None:
+        log("ema:swapping EMA weights for serialization")
+        model.update(tree_unflatten(list(ema_state.items())))
     out_path = out_dir / f"{args.run_id}_mlx_model.npz"
     flat_state = {k: v for k, v in tree_flatten(model.state)}
     mx.savez(str(out_path), **flat_state)  # MLX's native save format (numpy-compatible .npz)

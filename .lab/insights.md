@@ -9,7 +9,7 @@ commit: e8addc5
 val_bpb: 1.6215 (Apple Silicon, 10L, asymmetric MLP 2x/4x, LeakyReLU(0.5)², GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_063_leakyrelu_med.txt
-next_exp: 064
+next_exp: 065
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -77,6 +77,7 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 - **Full-training QAT (QAT_STOP_LR_MUL=0) is neutral vs pre-warmdown-only**: exp_056 QAT through warmdown gives slightly better quant gap (+0.0025 vs +0.0029) but slightly worse pre-quant BPB (1.6283 vs 1.6270). Effects cancel (post-quant 1.6308 vs 1.6299, within noise). Key insight: the "sacred warmdown" rule applies to loss-modifying interventions (SWA, depth recurrence) but NOT to weight perturbations like constant-strength QAT noise. Keep pre-warmdown-only config (QAT_STOP_LR_MUL=0.8).
 - **SWA with wide window is catastrophic**: exp_037 val_bpb=1.7601 (+0.127). Uniform averaging of 60 snapshots over lr_mul<0.5 (~60% of steps) destroys convergence. Pre-SWA model was 1.6288 (within noise of best). Competition uses narrow SWA (last 100-120 steps, lr_mul<0.1) or high-decay EMA (0.9999). Better compression though (12.6MB vs 13.0MB).
 - **SWA with narrow window still hurts on Mac**: exp_038 val_bpb=1.6363 (+0.003). 24 snapshots, lr_mul<0.1, every 5 steps. Pre-SWA was 1.6295, post-SWA 1.6363 (+0.007). Much better than wide SWA but still a regression. With only ~700 steps, weights monotonically converge during warmdown — no oscillation to average out. **SWA is KILLED for Apple Silicon experiments.** May still help on 8xH100 with 1500+ steps.
+- **EMA (decay=0.997) is CATASTROPHIC on Mac, reserve for H100 [KILLED ON MAC]**: exp_064 val_bpb=1.8437 (+0.22). Effective window = 1/(1-0.997) = 333 steps = 48% of 689 total steps. EMA weights dominated by early under-trained parameters. Pre-EMA model was 1.6224 (fine), confirming all damage is from the averaging. On H100 (6000+ steps), same decay gives 5.5% window — should work. For Mac, would need decay >= 0.98 (~50-step window, 7% of training), but even then marginal benefit is unlikely given SWA's failure. **Weight averaging (SWA and EMA) is KILLED for Mac.** EMA (decay=0.997) remains planned for H100.
 - **Per-layer LR scaling is marginally positive**: exp_039 LAYER_LR_SCALE=0.5 gives val_bpb=1.6321 (-0.0013 vs best). Deeper layers get higher LR (1.0x to 1.5x range). Within noise but zero overhead, so keeping it. May show larger gains on H100 with more steps.
 - **Layer LR scale saturates between 0.5 and 1.0**: exp_043 LAYER_LR_SCALE=1.0 (deepest=2.0x LR) gives val_bpb=1.6316 (+0.0005 vs best). Nearly identical to scale=0.5 (1.6311). Not worth fine-tuning further — 0.5 is sufficient.
 - **WARMUP_STEPS=50 is marginally better than 20**: exp_046 val_bpb=1.6309 (-0.0002 vs best). Pre-quant 1.6284 (best pre-quant ever). Longer warmup gives Muon's Newton-Schulz better initial conditions. Complements GRAD_CLIP_NORM=0.5 — both stabilize early training through orthogonal mechanisms (LR ramp vs gradient magnitude). Zero cost.
@@ -88,7 +89,7 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 
 ## Porting to 8xH100
 
-Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval, (5) LeakyReLU(0.5)² activation.
+Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval, (5) LeakyReLU(0.5)² activation, (6) EMA (decay=0.997) — validated by top teams on H100, killed on Mac.
 Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT_ASYMMETRIC=2,4, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10.
 Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
 
@@ -130,6 +131,7 @@ Three comparative runs on 8xH100 (80/195 shards, 524K batch, 600s wallclock):
 
 **Killed definitively (both Mac + H100)**:
 - SWA (any form) — Mac: no oscillation at 700 steps. H100: 23 snapshots still hurts.
+- EMA on Mac (any decay) — Mac: decay=0.997 gives 48% window at 689 steps, +0.22 BPB. Weight averaging is dead on Mac.
 - Int6 without STE/GPTQ — Mac: +0.063 gap. H100: +0.092 gap. Even worse with more params.
 - Label smoothing with small vocab — catastrophic
 - Depth recurrence during warmdown — warmdown is sacred
