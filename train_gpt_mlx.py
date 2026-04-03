@@ -392,7 +392,7 @@ class MLP(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         x = self.fc(x)
-        x = mx.where(x > 0, x, 0.5 * x)  # LeakyReLU(0.5) — preserves negative gradient flow
+        x = mx.where(x > 0, x, 0.7 * x)  # LeakyReLU(0.7) — more negative gradient flow
         return self.proj(x * x)
 
 
