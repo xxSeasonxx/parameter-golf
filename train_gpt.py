@@ -1054,8 +1054,8 @@ def grow_model(
     return big
 
 
-def build_optimizers(base_model: GPT, args: Hyperparameters, num_layers: int, lr_scale: float = 1.0) -> list:
-    """Build all optimizer groups for the model. Returns [tok, (head), muon, scalar]."""
+def build_optimizers(base_model: GPT, args: Hyperparameters, num_layers: int, lr_scale: float = 1.0) -> tuple:
+    """Build all optimizer groups. Returns (optimizers_list, muon_optimizer)."""
     block_named_params = list(base_model.blocks.named_parameters())
     matrix_params = [p for n, p in block_named_params
                      if p.ndim == 2 and not any(pat in n for pat in CONTROL_TENSOR_NAME_PATTERNS)]
@@ -1092,7 +1092,7 @@ def build_optimizers(base_model: GPT, args: Hyperparameters, num_layers: int, lr
             [{"params": [base_model.lm_head.weight], "lr": args.head_lr * lr_scale, "base_lr": args.head_lr}],
             betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True)
         opts.insert(1, optimizer_head)
-    return opts
+    return opts, optimizer_muon
 
 
 def main() -> None:
@@ -1205,7 +1205,7 @@ def main() -> None:
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=not args.deep_supervision)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False, find_unused_parameters=True) if distributed else compiled_model
-    optimizers = build_optimizers(base_model, args, effective_num_layers)
+    optimizers, optimizer_muon = build_optimizers(base_model, args, effective_num_layers)
 
     ema_state = None
     if args.ema_decay > 0:
@@ -1338,7 +1338,7 @@ def main() -> None:
                 restore_low_dim_params_to_fp32(base_model)
                 compiled_model = torch.compile(base_model, dynamic=False, fullgraph=not args.deep_supervision)
                 model = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False, find_unused_parameters=True) if distributed else compiled_model
-                optimizers = build_optimizers(base_model, args, args.num_layers, lr_scale=scale)
+                optimizers, optimizer_muon = build_optimizers(base_model, args, args.num_layers, lr_scale=scale)
                 if ema_state is not None:
                     ema_state = {k: v.clone() for k, v in base_model.state_dict().items()}
                 log0(f"layer_growth: rebuilt model, optimizers, EMA. New params: {sum(p.numel() for p in base_model.parameters())}")
@@ -1423,19 +1423,19 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), calibrated=args.calibrated_quant)
-    quant_buf = io.BytesIO()
-    torch.save(quant_obj, quant_buf)
-    quant_raw = quant_buf.getvalue()
-    if args.use_zstd and zstd_mod is not None:
-        compressor = zstd_mod.ZstdCompressor(level=args.zstd_level)
-        quant_blob = compressor.compress(quant_raw)
-        compress_name = f"zstd-{args.zstd_level}"
-    else:
-        quant_blob = zlib.compress(quant_raw, level=9)
-        compress_name = "zlib-9"
-    quant_raw_bytes = len(quant_raw)
     if master_process:
+        quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), calibrated=args.calibrated_quant)
+        quant_buf = io.BytesIO()
+        torch.save(quant_obj, quant_buf)
+        quant_raw = quant_buf.getvalue()
+        if args.use_zstd and zstd_mod is not None:
+            compressor = zstd_mod.ZstdCompressor(level=args.zstd_level)
+            quant_blob = compressor.compress(quant_raw)
+            compress_name = f"zstd-{args.zstd_level}"
+        else:
+            quant_blob = zlib.compress(quant_raw, level=9)
+            compress_name = "zlib-9"
+        quant_raw_bytes = len(quant_raw)
         with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
         quant_file_bytes = os.path.getsize("final_model.int8.ptz")
