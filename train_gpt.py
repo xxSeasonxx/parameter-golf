@@ -1167,6 +1167,78 @@ def eval_val_ttt_lora(
     return val_loss, val_bpb
 
 # -----------------------------
+# PROGRESSIVE LAYER GROWING
+# -----------------------------
+
+def grow_model(
+    small_model: GPT,
+    args,
+    device,
+) -> GPT:
+    """Grow a small model to full depth by inserting new layers with zero-init outputs."""
+    small_state = small_model.state_dict()
+    small_enc = small_model.num_encoder_layers
+    small_dec = small_model.num_decoder_layers
+
+    # Create full-size model
+    big = GPT(
+        vocab_size=args.vocab_size,
+        num_layers=args.num_layers,
+        model_dim=args.model_dim,
+        num_heads=args.num_heads,
+        num_kv_heads=args.num_kv_heads,
+        mlp_mult=args.mlp_mult,
+        tie_embeddings=args.tie_embeddings,
+        tied_embed_init_std=args.tied_embed_init_std,
+        logit_softcap=args.logit_softcap,
+        rope_base=args.rope_base,
+        qk_gain_init=args.qk_gain_init,
+        mlp_mult_asymmetric=args.mlp_mult_asymmetric,
+        freq_skip_gating=args.freq_skip_gating,
+        freq_skip_window=args.freq_skip_window,
+        deep_supervision=args.deep_supervision,
+        deep_supervision_alpha=args.deep_supervision_alpha,
+        deep_supervision_tap_layers=(
+            [int(x) for x in args.deep_supervision_layers.split(",") if x]
+            if args.deep_supervision_layers
+            else list(range(1, args.num_layers - 1, 2))
+        ) if args.deep_supervision else None,
+    ).to(device).bfloat16()
+
+    big_enc = big.num_encoder_layers
+    big_dec = big.num_decoder_layers
+    big_state = big.state_dict()
+
+    # Copy non-block parameters directly (tok_emb, skip_weights, final_norm, etc.)
+    for k, v in small_state.items():
+        if not k.startswith("blocks."):
+            if k in big_state and big_state[k].shape == v.shape:
+                big_state[k] = v.clone()
+
+    # Copy encoder blocks: small encoder blocks map to first small_enc positions of big encoder
+    for i in range(small_enc):
+        for k, v in small_state.items():
+            if k.startswith(f"blocks.{i}."):
+                if k in big_state:
+                    big_state[k] = v.clone()
+
+    # Copy decoder blocks: small decoder blocks map to LAST small_dec positions of big model
+    for i in range(small_dec):
+        small_idx = small_enc + i
+        big_idx = big_enc + (big_dec - small_dec) + i  # align to end of big decoder
+        for k, v in small_state.items():
+            if k.startswith(f"blocks.{small_idx}."):
+                suffix = k[len(f"blocks.{small_idx}."):]
+                big_key = f"blocks.{big_idx}.{suffix}"
+                if big_key in big_state and big_state[big_key].shape == v.shape:
+                    big_state[big_key] = v.clone()
+
+    # New blocks (in between) already have zero-init output projections from _init_weights()
+    big.load_state_dict(big_state)
+    return big
+
+
+# -----------------------------
 # TRAINING
 # -----------------------------
 
@@ -1267,9 +1339,10 @@ def main() -> None:
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
 
+    effective_num_layers = args.grow_layers_from if args.grow_layers_from > 0 else args.num_layers
     base_model = GPT(
         vocab_size=args.vocab_size,
-        num_layers=args.num_layers,
+        num_layers=effective_num_layers,
         model_dim=args.model_dim,
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
@@ -1339,7 +1412,7 @@ def main() -> None:
         group["base_lr"] = args.matrix_lr
     if args.layer_lr_scale != 0:
         param_to_scale = {}
-        n = max(args.num_layers - 1, 1)
+        n = max(effective_num_layers - 1, 1)
         for name, p in base_model.blocks.named_parameters():
             if p.ndim == 2 and not any(pat in name for pat in CONTROL_TENSOR_NAME_PATTERNS):
                 layer_idx = int(name.split(".")[0])
@@ -1447,6 +1520,7 @@ def main() -> None:
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
+    layer_grown = args.grow_layers_from == 0  # True if disabled (no growth needed)
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1487,6 +1561,70 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+
+        # Progressive layer growing
+        if not layer_grown:
+            elapsed_frac = elapsed_ms / max_wallclock_ms if max_wallclock_ms else 0
+            if elapsed_frac >= args.grow_at_wallclock_frac:
+                layer_grown = True
+                log0(f"layer_growth: {args.grow_layers_from}L -> {args.num_layers}L at wallclock_frac={elapsed_frac:.3f} step={step}")
+
+                # Grow model
+                base_model = grow_model(base_model, args, device)
+                for module in base_model.modules():
+                    if isinstance(module, CastedLinear):
+                        module.float()
+                    if isinstance(module, Rotary):
+                        module.inv_freq.data = module.inv_freq.data.float()
+                restore_low_dim_params_to_fp32(base_model)
+                compiled_model = torch.compile(base_model, dynamic=False, fullgraph=not args.deep_supervision)
+                model = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+
+                # Rebuild optimizers (reuse the same setup logic)
+                block_named_params = list(base_model.blocks.named_parameters())
+                matrix_params = [p for name, p in block_named_params
+                    if p.ndim == 2 and not any(pat in name for pat in CONTROL_TENSOR_NAME_PATTERNS)]
+                scalar_params = [p for name, p in block_named_params
+                    if p.ndim < 2 or any(pat in name for pat in CONTROL_TENSOR_NAME_PATTERNS)]
+                if base_model.skip_weights.numel() > 0:
+                    scalar_params.append(base_model.skip_weights)
+                if hasattr(base_model, 'skip_lo_weights'):
+                    scalar_params.append(base_model.skip_lo_weights)
+                    scalar_params.append(base_model.skip_hi_weights)
+
+                token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
+                optimizer_tok = torch.optim.Adam(
+                    [{"params": [base_model.tok_emb.weight], "lr": token_lr * scale, "base_lr": token_lr}],
+                    betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True)
+                optimizer_muon = Muon(matrix_params, lr=args.matrix_lr * scale,
+                    momentum=args.muon_momentum, backend_steps=args.muon_backend_steps,
+                    weight_decay=args.muon_weight_decay)
+                for group in optimizer_muon.param_groups:
+                    group["base_lr"] = args.matrix_lr
+                if args.layer_lr_scale != 0:
+                    param_to_scale = {}
+                    n = max(args.num_layers - 1, 1)
+                    for name, p in base_model.blocks.named_parameters():
+                        if p.ndim == 2 and not any(pat in name for pat in CONTROL_TENSOR_NAME_PATTERNS):
+                            layer_idx = int(name.split(".")[0])
+                            param_to_scale[id(p)] = 1.0 + args.layer_lr_scale * (layer_idx / n)
+                    optimizer_muon.set_layer_lr_scales(param_to_scale)
+                optimizer_scalar = torch.optim.Adam(
+                    [{"params": scalar_params, "lr": args.scalar_lr * scale, "base_lr": args.scalar_lr}],
+                    betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True)
+                optimizers = [optimizer_tok, optimizer_muon, optimizer_scalar]
+                if base_model.lm_head is not None:
+                    optimizer_head = torch.optim.Adam(
+                        [{"params": [base_model.lm_head.weight], "lr": args.head_lr * scale, "base_lr": args.head_lr}],
+                        betas=(args.beta1, args.beta2), eps=args.adam_eps, fused=True)
+                    optimizers.insert(1, optimizer_head)
+
+                # Rebuild EMA if active
+                if ema_state is not None:
+                    ema_state = {k: v.clone() for k, v in base_model.state_dict().items()}
+
+                log0(f"layer_growth: rebuilt model, optimizers, EMA. New params: {sum(p.numel() for p in base_model.parameters())}")
+
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
