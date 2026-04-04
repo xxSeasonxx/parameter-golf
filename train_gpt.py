@@ -437,6 +437,9 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
         0,
     )
 
+    # Named patterns force specific large tensors to stay as FP16 (e.g., tied embeddings)
+    fp16_pats = tuple(p for p in os.environ.get("INT8_KEEP_FLOAT_FP16_NAME_PATTERNS", "").split(",") if p)
+
     for name, tensor in state_dict.items():
         t = tensor.detach().to("cpu").contiguous()
         stats["param_count"] += int(t.numel())
@@ -452,6 +455,13 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
         # Small float tensors are cheap enough to keep directly. We still downcast
         # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
         if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+            kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
+            passthrough[name] = kept
+            stats["int8_payload_bytes"] += tensor_nbytes(kept)
+            continue
+
+        # Named patterns force specific large tensors to stay as FP16 (e.g., tied embeddings)
+        if fp16_pats and any(p in name for p in fp16_pats):
             kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
             passthrough[name] = kept
             stats["int8_payload_bytes"] += tensor_nbytes(kept)
@@ -1511,7 +1521,13 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = zlib.compress(quant_raw, level=9)
+    if args.use_zstd and zstd_mod is not None:
+        compressor = zstd_mod.ZstdCompressor(level=args.zstd_level)
+        quant_blob = compressor.compress(quant_raw)
+        compress_name = f"zstd-{args.zstd_level}"
+    else:
+        quant_blob = zlib.compress(quant_raw, level=9)
+        compress_name = "zlib-9"
     quant_raw_bytes = len(quant_raw)
     if master_process:
         with open("final_model.int8.ptz", "wb") as f:
@@ -1520,10 +1536,10 @@ def main() -> None:
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
-            f"Serialized model int8+zlib: {quant_file_bytes} bytes "
+            f"Serialized model int8+{compress_name}: {quant_file_bytes} bytes "
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(f"Total submission size int8+{compress_name}: {quant_file_bytes + code_bytes} bytes")
 
     # Round-trip validation: load the compressed artifact back, dequantize, and re-evaluate
     # to confirm the quantized model's actual quality (what the submission scorer will see).
@@ -1531,7 +1547,12 @@ def main() -> None:
         dist.barrier()
     with open("final_model.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
-    quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
+    if args.use_zstd and zstd_mod is not None:
+        decompressor = zstd_mod.ZstdDecompressor()
+        quant_raw_disk = decompressor.decompress(quant_blob_disk)
+    else:
+        quant_raw_disk = zlib.decompress(quant_blob_disk)
+    quant_state = torch.load(io.BytesIO(quant_raw_disk), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
