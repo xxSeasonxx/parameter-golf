@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: exp_069 LeakyReLU(0.7)² (DISCARD — +0.0016 BPB, slope 0.5 optimal)
+**Latest**: exp_074 Seq Len Curriculum (NEUTRAL — +0.002 BPB, Mac exhausted)
 **H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
@@ -81,6 +81,11 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 067 | exp_067_partial_rope | Partial RoPE (25% dims) | 697/2000 | 1.6240 | 13.1MB | Discard | +0.0025 BPB, full RoPE better at short seq_len=1024 |
 | 068 | exp_068_gelu2 | GELU² activation | 687/2000 | 1.6373 | 12.7MB | Discard | +0.016 BPB, Gaussian gating kills negative gradient flow |
 | 069 | exp_069_leaky07 | LeakyReLU(0.7)² activation | 695/2000 | 1.6231 | 13.3MB | Discard | +0.0016 BPB, slope 0.5 optimal. Activation sweep CLOSED |
+| 070 | exp_070 | MODEL_DIM=544 (wider model) | 590/2000 | 1.6446 | 14.1MB | Discard | +0.023 BPB, 1018ms/step too slow on Mac |
+| 071 | exp_071 | Baseline reconfirm (control) | 688/2000 | 1.6251 | 13.1MB | Control | Matches exp_063 within noise (+0.0009) |
+| 072 | exp_072 | Byte-weighted loss (BPB-aligned training) | 679/2000 | 1.6659 | 13.1MB | Discard | +0.041 BPB. Training-eval mismatch is NOT the bottleneck |
+| 073 | exp_073 | Deep supervision (tap layers 1,3,5,7) | 651/2000 | 1.6351 | 13.0MB | Discard (Mac) | +0.010 BPB on Mac (5% overhead kills), per-step quality better. H100 candidate |
+| 074 | exp_074 | Seq len curriculum (256→512→1024) | 786/2000 | 1.6271 | 13.5MB | Discard | +0.002 BPB (neutral). 14% more steps but short-seq less efficient |
 
 ### H100 RunPod Runs (2026-04-03)
 
@@ -1271,6 +1276,54 @@ The quant gap is **+0.063 +/- 0.003** regardless of QAT strength. Three data poi
 - MODEL_DIM=544 produces 1018ms/step (19% slower than dim=512's 855ms). The compute scaling is super-linear in dim on Apple Silicon (dim increases 6.25%, step time increases 19%).
 - Model width increases should be reserved for H100 where step time is batch-dominated (93ms/step), not compute-dominated. On H100, dim=544 would likely add <5ms/step while providing 13% more capacity.
 - Kill model width experiments on Mac. The dim=512 / 10L / MLP-asymmetric(2,4) configuration is the optimal capacity allocation for Apple Silicon's wallclock constraint.
+
+---
+
+### First-Principles Innovation Sprint (exp_071–074, 2026-04-03/04)
+
+Three original ideas from an RL-inspired first-principles perspective, each A/B tested in isolation against exp_071 baseline (1.6251 post-quant).
+
+### Experiment 071: Baseline Reconfirm (Control)
+
+Re-run of current best config to establish the control reference. Result: val_bpb=1.6251 post-quant, 688 steps at 873ms/step. Matches exp_063 (1.6215) within noise.
+
+### Experiment 072: Byte-Weighted Loss (Discard — +0.041 BPB)
+
+**Idea**: Weight each token's training CE by its decoded byte count, directly optimizing BPB instead of token-level CE. The hypothesis was that multi-byte tokens matter more to BPB but get equal gradient weight, so importance sampling on the actual reward function should help.
+
+**Result**: val_bpb=1.6659, +0.041 BPP regression. The worst outcome of the sprint.
+
+**Why it failed**: The byte weighting concentrates gradients on multi-byte tokens (long word pieces, multi-byte UTF-8) while under-training frequent single-byte tokens (spaces, punctuation, common letters). These single-byte tokens are individually cheap in BPB but collectively dominate the evaluation metric through sheer frequency. Standard token-level CE already optimizes BPB effectively because improving prediction quality on ANY token improves BPB — the byte-count weighting in the eval metric is just a normalization constant, not an importance signal for training.
+
+**Key principle**: Training-eval objective mismatch is NOT a bottleneck for BPB. Token-level CE and BPB are highly correlated enough that direct optimization provides no benefit and significant harm.
+
+### Experiment 073: Deep Supervision (Discard on Mac, H100 Candidate — +0.010 BPB)
+
+**Idea**: Add auxiliary next-token prediction losses at layers [1, 3, 5, 7], projecting each intermediate hidden state through the shared embedding (zero new parameters). Losses use geometric decay weighting (alpha=0.1). This is "deep supervision" from computer vision (Inception, DenseNet) — forces early layers to maintain prediction-useful features rather than relying on gradient signal diluted through 10+ layers of backprop.
+
+**Result**: val_bpb=1.6351, +0.010 BPB regression overall. BUT:
+- At step 500: val_bpb=1.7223 vs baseline 1.7307 — **per-step quality is better by 0.008 BPB**
+- 651 total steps at 923ms/step (5% overhead from 4 extra projections through shared embedding)
+- The overhead cost 37 steps (688→651), which exceeded the per-step quality gain
+
+**Why it's an H100 candidate**: On H100 with 6000+ steps, the 5% overhead costs ~300 steps (6000→5700). But the per-step quality improvement of ~0.008 BPP scales multiplicatively: 5700 steps × better-per-step should beat 6000 steps × baseline-per-step. The math: 0.008 BPB gain at step 500 ÷ 500 steps × 5700 steps ≈ 0.091 BPB accumulated improvement, minus the 300-step loss penalty. Net should be solidly positive.
+
+**Key principle**: On Mac (~700 steps), ANY per-step overhead >3% is lethal. Step count is the master constraint. This reverses on H100 where step count is abundant and per-step quality is the bottleneck.
+
+### Experiment 074: Progressive Sequence Length Curriculum (Neutral — +0.002 BPB)
+
+**Idea**: Train in 3 phases with increasing seq_len: 256 (0-25% wallclock) → 512 (25-55%) → 1024 (55-100%). Same tokens/step throughout. Shorter sequences = more independent training contexts per step = better gradient diversity for local pattern learning. This is curriculum learning (easy→hard) applied to sequence structure.
+
+**Result**: val_bpb=1.6271, +0.002 BPB (within noise). Key observations:
+- seq_len=256 runs at 665ms/step (31% faster than 873ms at 1024)
+- Total 786 steps — 14% more than baseline's 688
+- Phase transitions at steps 230 (256→512) and 480 (512→1024)
+- Only 306 steps at full seq_len=1024 (vs baseline's 688)
+- At step 500 (just 20 steps after transitioning to 1024): val_bpb=1.8128 (+0.082 worse due to short exposure to full context)
+
+**Why it was neutral**: The extra steps from faster early phases compensate for the less efficient short-sequence training, but don't exceed it. Short-sequence steps teach local n-gram patterns efficiently but miss long-range dependencies that are critical for BPB at seq_len=1024. The model needs ~200+ steps at full context to recover from the curriculum transition. Net: a wash.
+
+**Key principle**: Curriculum learning by sequence length doesn't help when total training time is wallclock-constrained. The model needs sufficient exposure to the evaluation sequence length during final convergence.
 
 ---
 

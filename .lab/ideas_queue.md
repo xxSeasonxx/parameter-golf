@@ -51,10 +51,27 @@ Run these in order. Each = one commit per program.md.
 
 ---
 
-## Backlog: Not Yet Run (low priority)
+## First-Principles Innovation Sprint (exp_071-075)
 
-- Zstd compression on Mac — validated on H100, saves 1.6MB. Not urgent locally.
-- Int6 + Zstd combined — int6 is killed without STE/GPTQ.
+**Goal**: Three original innovations, each tested in A/B isolation against current best baseline.
+**Baseline**: val_bpb=1.6215 (exp_063, commit e8addc5)
+**Target**: H100 competition (leaderboard 1.1194, our best 1.2087, gap 0.089 BPB)
+**Philosophy**: Fix the training-eval objective mismatch, inject gradient signal deeper, use compute more efficiently.
+
+### ~~Experiment 071: Baseline Reconfirm~~ COMPLETED -- CONTROL
+**Result**: val_bpb=1.6251 post-quant (1.6224 pre-quant). 688 steps, 873ms/step, 13.1MB artifact. Matches exp_063 (1.6215) within noise (+0.0009).
+
+### ~~Experiment 072: Byte-Weighted Loss~~ COMPLETED -- DISCARD
+**Result**: val_bpb=1.6659 post-quant, **+0.041 BPB regression**. 679 steps, 885ms/step. Byte weighting concentrates gradients on multi-byte tokens and under-trains frequent single-byte tokens. Standard token-level CE already optimizes BPB effectively through its correlation with per-token prediction quality. Training-eval objective mismatch is NOT the bottleneck. **Kill byte-weighted loss.**
+
+### ~~Experiment 073: Deep Supervision~~ COMPLETED -- DISCARD (Mac), PROMISING (H100)
+**Result**: val_bpb=1.6351 post-quant, **+0.010 BPB on Mac**. 651 steps at 923ms/step (5% overhead). BUT per-step quality was BETTER (1.7223 vs 1.7307 at step 500, -0.008 BPB). The 5% overhead cost 37 steps (688→651), killing the gain. **On H100 (6000+ steps), 5% overhead = ~300 steps lost but per-step improvement compounds over 5700+ steps. Strong H100 candidate.** Uses shared embedding projection (zero new parameters). Tap layers [1,3,5,7], alpha=0.1.
+
+### ~~Experiment 074: Seq Len Curriculum~~ COMPLETED -- NEUTRAL (Mac), INTERESTING (H100)
+**Result**: val_bpb=1.6271 post-quant, **+0.002 BPB (within noise)**. 786 steps (14% more than baseline!) at 764ms avg. Phases: 230 steps@256 (654ms), 250 steps@512 (~750ms), 306 steps@1024 (~873ms). Short-sequence steps train local patterns faster but are less efficient for final BPB at seq_len=1024. Net wash on Mac. **Interesting for H100 where the extra steps from faster early phases could compound with other improvements.**
+
+### Experiment 075: Combined Winners [STACK] — SKIPPED
+No clear winners on Mac. Deep supervision and curriculum are both H100 candidates but not additive on Mac.
 
 ---
 

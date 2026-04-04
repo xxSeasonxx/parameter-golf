@@ -9,7 +9,7 @@ commit: e8addc5
 val_bpb: 1.6215 (Apple Silicon, 10L, asymmetric MLP 2x/4x, LeakyReLU(0.5)², GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_063_leakyrelu_med.txt
-next_exp: 071
+next_exp: 075
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -142,6 +142,15 @@ Three comparative runs on 8xH100 (80/195 shards, 524K batch, 600s wallclock):
 - Label smoothing with small vocab — catastrophic
 - Depth recurrence during warmdown — warmdown is sacred
 
+## First-Principles Innovation Sprint (exp_071-074)
+
+Three original ideas tested with A/B isolation against baseline (1.6251 post-quant):
+
+- **Byte-weighted loss is DEAD (exp_072, +0.041 BPB)**: Weighting token CE by decoded byte count to directly optimize BPB is counterproductive. It concentrates gradients on multi-byte tokens while under-training frequent single-byte tokens. Standard CE already optimizes BPB well through per-token quality correlation. The training-eval objective mismatch is NOT a bottleneck. Don't modify the loss weighting.
+- **Deep supervision is DEAD on Mac, LIVE for H100 (exp_073)**: Auxiliary next-token prediction at layers [1,3,5,7] through shared embedding. Per-step quality improves (-0.008 BPB at step 500) but 5% overhead (923ms vs 873ms) reduces total steps (651 vs 688), net +0.010 BPB. On H100, the 5% overhead costs ~300 of 6000+ steps while the per-step gain compounds — strong candidate.
+- **Seq len curriculum is NEUTRAL on Mac, INTERESTING for H100 (exp_074)**: Progressive 256→512→1024 gets 14% more steps (786 vs 688) but short-sequence steps are less efficient for final seq_len=1024 eval. Net wash (+0.002 BPB). On H100 the extra steps could matter more.
+- **Key principle**: On Mac (~700 steps), ANY per-step overhead >3% is lethal. Step count is the master constraint. On H100 (~6000 steps), per-step quality matters more than raw step count.
+
 ## Apple Silicon Plateau Analysis
 
-After 27 experiments at the current config level (exp_035-061), Apple Silicon val_bpb appeared plateaued at ~1.630 +/- 0.003. However, exp_063 (LeakyReLU(0.5)²) broke through with **1.6215**, proving that architectural improvements to capacity utilization can still deliver significant wins. The plateau was in optimization hyperparameters, not architecture. Remaining moonshot experiments (EMA, multi-band skip gating, XSA, partial RoPE) now stack on top of this new baseline.
+After 27 experiments at the current config level (exp_035-061), Apple Silicon val_bpb appeared plateaued at ~1.630 +/- 0.003. However, exp_063 (LeakyReLU(0.5)²) broke through with **1.6215**, proving that architectural improvements to capacity utilization can still deliver significant wins. The plateau was in optimization hyperparameters, not architecture. The first-principles sprint (exp_071-074) confirmed that the Mac is fully exhausted — novel training techniques can't overcome the step budget constraint. All remaining gains must come from H100.

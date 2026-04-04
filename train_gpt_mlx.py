@@ -115,6 +115,25 @@ class Hyperparameters:
     qat_stop_lr_mul: float = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
     qat_every: int = int(os.environ.get("QAT_EVERY", 10))
 
+    # Byte-weighted loss: weight each token's CE by its decoded byte count.
+    # Directly optimizes BPB instead of token-level CE.
+    byte_weighted_loss: bool = bool(int(os.environ.get("BYTE_WEIGHTED_LOSS", "0")))
+    byte_weight_clamp_lo: float = float(os.environ.get("BYTE_WEIGHT_CLAMP_LO", 0.5))
+    byte_weight_clamp_hi: float = float(os.environ.get("BYTE_WEIGHT_CLAMP_HI", 3.0))
+
+    # Deep supervision: add auxiliary next-token prediction losses at intermediate layers.
+    # Uses shared embedding for projections (zero new parameters). Auxiliary losses use
+    # geometric decay weighting: alpha^(n_taps - i) for tap i.
+    deep_supervision: bool = bool(int(os.environ.get("DEEP_SUPERVISION", "0")))
+    deep_supervision_alpha: float = float(os.environ.get("DEEP_SUPERVISION_ALPHA", 0.1))
+    # Comma-separated layer indices to tap. Default: every 2nd layer starting from 1.
+    deep_supervision_layers: str = os.environ.get("DEEP_SUPERVISION_LAYERS", "")
+
+    # Sequence length curriculum: progressive seq_len phases based on wallclock fraction.
+    # Format: "seq_len:end_fraction,..." e.g. "256:0.25,512:0.55,1024:1.0"
+    # Phases must be in ascending order of both seq_len and fraction.
+    seq_len_curriculum: str = os.environ.get("SEQ_LEN_CURRICULUM", "")
+
     # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
     # stride=0 disables sliding window (default, non-overlapping chunks).
     # stride=64 matches the competition's best evaluation strategy.
@@ -432,12 +451,20 @@ class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
                  qk_gain_init: float, freq_skip_gating: bool = False, freq_skip_window: int = 32,
-                 mlp_mult_asymmetric: str = ""):
+                 mlp_mult_asymmetric: str = "",
+                 byte_weighted_loss: bool = False, byte_weight_clamp_lo: float = 0.5, byte_weight_clamp_hi: float = 3.0,
+                 deep_supervision: bool = False, deep_supervision_alpha: float = 0.1, deep_supervision_tap_layers: list[int] | None = None):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
+        self._byte_weighted_loss = byte_weighted_loss
+        self._byte_weight_clamp_lo = byte_weight_clamp_lo
+        self._byte_weight_clamp_hi = byte_weight_clamp_hi
+        self._deep_supervision = deep_supervision
+        self._deep_supervision_alpha = deep_supervision_alpha
+        self._aux_tap_set = set(deep_supervision_tap_layers) if deep_supervision_tap_layers else set()
 
         self.tok_emb = nn.Embedding(vocab_size, dim)
         self.num_encoder_layers = num_layers // 2
@@ -468,6 +495,19 @@ class GPT(nn.Module):
         self.tok_emb.weight = (
             mx.random.normal(self.tok_emb.weight.shape, dtype=mx.float32) * tied_embed_init_std
         ).astype(COMPUTE_DTYPE)
+
+    def set_byte_luts(self, base_bytes_lut: np.ndarray, has_leading_space_lut: np.ndarray, is_boundary_token_lut: np.ndarray) -> None:
+        """Store byte count LUTs for byte-weighted loss. Called once before training."""
+        self._base_bytes_lut = mx.array(base_bytes_lut.astype(np.float32))
+        self._has_leading_space_lut = mx.array(has_leading_space_lut.astype(np.float32))
+        self._is_boundary_lut = mx.array(is_boundary_token_lut.astype(np.float32))
+
+    def _byte_weights(self, input_ids_flat: mx.array, target_ids_flat: mx.array) -> mx.array:
+        """Compute per-token byte weights matching the BPB eval metric."""
+        bw = self._base_bytes_lut[target_ids_flat]
+        # Add 1 byte for leading space when prev token is not a boundary token
+        bw = bw + self._has_leading_space_lut[target_ids_flat] * (1.0 - self._is_boundary_lut[input_ids_flat])
+        return mx.clip(bw, self._byte_weight_clamp_lo, self._byte_weight_clamp_hi)
 
     def softcap(self, logits: mx.array) -> mx.array:
         c = self.logit_softcap
@@ -500,12 +540,69 @@ class GPT(nn.Module):
             x = self.blocks[self.num_encoder_layers + i](x, x0)
         return self.final_norm(x)
 
+    def _forward_aux(self, input_ids: mx.array) -> tuple[mx.array, list[mx.array]]:
+        """Forward pass with intermediate hidden state taps for deep supervision."""
+        x = rms_norm(self.tok_emb(input_ids).astype(COMPUTE_DTYPE))
+        x0 = x
+        skips: list[mx.array] = []
+        aux_states: list[mx.array] = []
+
+        for i in range(self.num_encoder_layers):
+            x = self.blocks[i](x, x0)
+            skips.append(x)
+            if i in self._aux_tap_set:
+                aux_states.append(x)
+        for i in range(self.num_decoder_layers):
+            if skips:
+                skip = skips.pop()
+                if self.freq_skip_gating:
+                    W = self.freq_skip_window
+                    s = skip.reshape(*skip.shape[:-1], -1, W)
+                    lo = mx.repeat(s.mean(axis=-1, keepdims=True), W, axis=-1).reshape(skip.shape)
+                    hi = skip - lo
+                    x = x + (self.skip_lo_weights[i].astype(x.dtype)[None, None, :] * lo +
+                             self.skip_hi_weights[i].astype(x.dtype)[None, None, :] * hi)
+                else:
+                    x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skip
+            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            if (self.num_encoder_layers + i) in self._aux_tap_set:
+                aux_states.append(x)
+        return self.final_norm(x), aux_states
+
+    def _compute_main_loss(self, x: mx.array, y: mx.array, input_ids: mx.array) -> mx.array:
+        """Compute main CE loss with optional byte weighting."""
+        logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
+        logits = self.softcap(logits_proj)
+        if self._byte_weighted_loss:
+            per_token_ce = nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="none")
+            bw = self._byte_weights(input_ids.reshape(-1), y)
+            return (per_token_ce * bw).sum() / bw.sum()
+        return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
+
+    def loss_train(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
+        """Training loss — byte weighting + deep supervision. Used by value_and_grad."""
+        dim = self.tok_emb.weight.shape[1]
+        y = target_ids.reshape(-1)
+
+        if self._deep_supervision:
+            final_x, aux_states = self._forward_aux(input_ids)
+            x = final_x.reshape(-1, dim)
+            main_loss = self._compute_main_loss(x, y, input_ids)
+            # Auxiliary losses: project each tap through shared embedding, geometric decay
+            n_aux = len(aux_states)
+            for i, aux_x in enumerate(aux_states):
+                ax = rms_norm(aux_x).reshape(-1, dim)
+                aux_logits = self.softcap(ax @ self.tok_emb.weight.astype(ax.dtype).T)
+                aux_ce = nn.losses.cross_entropy(aux_logits.astype(mx.float32), y, reduction="mean")
+                weight = self._deep_supervision_alpha ** (n_aux - i)
+                main_loss = main_loss + weight * aux_ce
+            return main_loss
+
+        x = self(input_ids).reshape(-1, dim)
+        return self._compute_main_loss(x, y, input_ids)
+
     def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
-        # MLX's nn.value_and_grad requires loss to be a method on the model (unlike PyTorch where
-        # the loss function is separate). This is because MLX traces through model.parameters()
-        # to determine what gets differentiated.
-        # Logit chunking splits the vocab projection to avoid materializing the full [tokens x vocab]
-        # logit matrix at once — critical on memory-limited unified memory Macs.
+        """Eval loss — always standard token-level CE (BPB is computed separately)."""
         x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
         y = target_ids.reshape(-1)
         if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
@@ -881,6 +978,7 @@ def loss_and_grad_chunked(
     args: Hyperparameters,
     train_loader: TokenLoader,
     compiled_loss_and_grad,
+    seq_len: int | None = None,
 ) -> tuple[mx.array, dict]:
     """Compute loss+grads for one microbatch, chunked into sub-batches for memory control.
 
@@ -888,12 +986,13 @@ def loss_and_grad_chunked(
     token_chunks() so the MLX lazy graph stays small. The outer training loop then
     accumulates across grad_accum_steps microbatches before calling opt.step().
     """
-    chunk_sizes = token_chunks(args.microbatch_tokens, args.train_seq_len, args.mlx_max_microbatch_tokens)
+    effective_seq_len = seq_len or args.train_seq_len
+    chunk_sizes = token_chunks(args.microbatch_tokens, effective_seq_len, args.mlx_max_microbatch_tokens)
     total_tokens = float(sum(chunk_sizes))
     loss_value = mx.array(0.0, dtype=mx.float32)
     grad_accum: dict[str, mx.array] | None = None
     for chunk_tokens in chunk_sizes:
-        x, y = train_loader.next_batch(chunk_tokens, args.train_seq_len)
+        x, y = train_loader.next_batch(chunk_tokens, effective_seq_len)
         loss, grads = compiled_loss_and_grad(x, y)  # still lazy — nothing computed yet
         scale = float(y.size) / total_tokens
         loss_value = loss_value + loss.astype(mx.float32) * scale
@@ -1141,7 +1240,25 @@ def main() -> None:
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
+        byte_weighted_loss=args.byte_weighted_loss,
+        byte_weight_clamp_lo=args.byte_weight_clamp_lo,
+        byte_weight_clamp_hi=args.byte_weight_clamp_hi,
+        deep_supervision=args.deep_supervision,
+        deep_supervision_alpha=args.deep_supervision_alpha,
+        deep_supervision_tap_layers=(
+            [int(x) for x in args.deep_supervision_layers.split(",") if x]
+            if args.deep_supervision_layers
+            else list(range(1, args.num_layers - 1, 2))  # default: every 2nd layer
+        ) if args.deep_supervision else None,
     )
+    if args.byte_weighted_loss:
+        model.set_byte_luts(base_bytes_lut, has_leading_space_lut, is_boundary_token_lut)
+        # Freeze byte LUTs so they're not trained or included in gradients
+        model.freeze(keys=["_base_bytes_lut", "_has_leading_space_lut", "_is_boundary_lut"])
+        log(f"byte_weighted_loss:enabled clamp=[{args.byte_weight_clamp_lo}, {args.byte_weight_clamp_hi}]")
+    if args.deep_supervision:
+        tap_layers = sorted(model._aux_tap_set)
+        log(f"deep_supervision:enabled alpha={args.deep_supervision_alpha} tap_layers={tap_layers}")
     opt = SplitOptimizers(model, args)
 
     # ==============================================================================
@@ -1162,7 +1279,7 @@ def main() -> None:
     compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
     compiled_loss_per_token = mx.compile(lambda x, y: model.loss_per_token(x, y), inputs=model.state, outputs=model.state)
     compiled_loss_and_grad = mx.compile(
-        nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
+        nn.value_and_grad(model, lambda x, y: model.loss_train(x, y)),
         inputs=model.state,
         outputs=model.state,
     )
@@ -1257,6 +1374,16 @@ def main() -> None:
 
         train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
 
+    # Parse sequence length curriculum phases
+    curriculum_phases: list[tuple[int, float]] = []  # [(seq_len, end_wallclock_fraction), ...]
+    if args.seq_len_curriculum:
+        for phase_str in args.seq_len_curriculum.split(","):
+            sl, frac = phase_str.strip().split(":")
+            curriculum_phases.append((int(sl), float(frac)))
+        log(f"seq_len_curriculum:phases={curriculum_phases}")
+    current_seq_len = curriculum_phases[0][0] if curriculum_phases else args.train_seq_len
+    current_phase_idx = 0
+
     train_time_ms = 0.0
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     stop_after_step: int | None = None
@@ -1290,13 +1417,24 @@ def main() -> None:
         lr_mul = args.lr_mul(step, train_time_ms + 1000.0 * (time.perf_counter() - t0))
         step_t0 = time.perf_counter()
 
+        # Curriculum: check if we should transition to next seq_len phase
+        if curriculum_phases and max_wallclock_ms:
+            approx_ms = train_time_ms + 1000.0 * (time.perf_counter() - t0)
+            frac = approx_ms / max_wallclock_ms
+            while current_phase_idx < len(curriculum_phases) - 1 and frac >= curriculum_phases[current_phase_idx][1]:
+                current_phase_idx += 1
+                new_seq_len = curriculum_phases[current_phase_idx][0]
+                if new_seq_len != current_seq_len:
+                    log(f"curriculum_transition: seq_len {current_seq_len} -> {new_seq_len} at wallclock_frac={frac:.3f} step={step}")
+                    current_seq_len = new_seq_len
+
         accum: dict[str, mx.array] | None = None
         train_loss = mx.array(0.0, dtype=mx.float32)
         # Gradient accumulation is explicit here (no scaler or DDP averaging).
         # PyTorch train_gpt.py divides by world_size * accum_steps; MLX has no distributed, so just accum_steps.
         grad_scale = 1.0 / args.grad_accum_steps
         for _ in range(args.grad_accum_steps):
-            loss, grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
+            loss, grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad, seq_len=current_seq_len)
             accum = accumulate_flat_grads(accum, grads, grad_scale)
             train_loss = train_loss + loss.astype(mx.float32) * grad_scale
             if args.mlx_eager_eval:
@@ -1333,6 +1471,7 @@ def main() -> None:
             log(
                 f"step:{step}/{args.iterations} train_loss:{train_loss_value:.4f} "
                 f"train_time:{approx_train_time_ms:.0f}ms step_avg:{approx_train_time_ms / step:.2f}ms tok_s:{tok_s:.0f}"
+                + (f" seq_len:{current_seq_len}" if curriculum_phases else "")
             )
         if max_wallclock_ms is not None and stop_after_step is None and approx_train_time_ms >= max_wallclock_ms:
             stop_after_step = step
@@ -1344,7 +1483,9 @@ def main() -> None:
     # quantized roundtrip directly by loading the dequantized tensors back into the
     # model and running one final validation pass.
     out_path = out_dir / f"{args.run_id}_mlx_model.npz"
-    flat_state = {k: v for k, v in tree_flatten(model.state)}
+    # Exclude byte LUTs (non-model arrays used only during training) from serialization
+    _byte_lut_keys = {"_base_bytes_lut", "_has_leading_space_lut", "_is_boundary_lut"}
+    flat_state = {k: v for k, v in tree_flatten(model.state) if k not in _byte_lut_keys}
     mx.savez(str(out_path), **flat_state)  # MLX's native save format (numpy-compatible .npz)
     log(f"saved_model:{out_path} bytes:{out_path.stat().st_size}")
 

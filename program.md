@@ -111,7 +111,18 @@ Be a researcher:
 - Design a minimal test: change one thing at a time when possible
 - Predict the outcome before running
 
-### 2. VALIDATE & COMMIT (main agent)
+### 2. CODE REVIEW (mandatory — DO NOT SKIP)
+
+**Before any validation or run, review your own implementation.** Spawn a code-review subagent or carefully self-review every changed line. Check for:
+- **Correctness**: Does the code match the hypothesis? Are tensor shapes right? Are operations applied in the correct order?
+- **Off-by-one errors**: Layer indices, slice boundaries, loop ranges.
+- **Dtype/device issues**: MLX dtype mismatches (e.g. float32 vs bfloat16), unintended casts.
+- **Side effects**: Does the change accidentally affect other code paths (e.g. breaking the baseline when the feature is disabled)?
+- **Env var defaults**: Is the feature disabled by default so the baseline is unchanged?
+
+If anything looks wrong, fix it before proceeding. A buggy experiment wastes 15+ minutes of compute and produces misleading results.
+
+### 3. VALIDATE & COMMIT (main agent)
 
 For code changes (skip for pure env-var changes):
 ```bash
@@ -127,11 +138,11 @@ Loss should start ~6.93 (ln(1024)) and decrease. Red flags: NaN, Inf, loss stuck
 
 **Always git commit before running.** Use a descriptive message with the experiment ID and hypothesis. `analyze.py` archives code into `.lab/<commit>/` after each run.
 
-### 3. RUN (main agent)
+### 4. RUN (main agent)
 
 Launch with the appropriate tier (smoke or medium). Get current best env vars from `.lab/insights.md`.
 
-### 4. POST-RUN BOOKKEEPING (mandatory subagent — DO NOT SKIP)
+### 5. POST-RUN BOOKKEEPING (mandatory subagent — DO NOT SKIP)
 
 **After every run, spawn a subagent to handle all bookkeeping.** This is the most critical step. The main agent MUST NOT proceed to the next experiment until the subagent completes and confirms all updates are done.
 
@@ -220,7 +231,7 @@ End your response with this exact checklist (fill in ✅ or ❌):
 
 **GATE: Do not start step 1 for the next experiment until the subagent returns with all items checked.**
 
-### 5. REPEAT
+### 6. REPEAT
 Re-read `program.md` (context gets long and you forget steps), then go back to step 1.
 
 ## Important Rules
