@@ -1204,7 +1204,7 @@ def main() -> None:
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=not args.deep_supervision)
-    model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+    model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False, find_unused_parameters=True) if distributed else compiled_model
     optimizers = build_optimizers(base_model, args, effective_num_layers)
 
     ema_state = None
@@ -1337,7 +1337,7 @@ def main() -> None:
                         module.inv_freq.data = module.inv_freq.data.float()
                 restore_low_dim_params_to_fp32(base_model)
                 compiled_model = torch.compile(base_model, dynamic=False, fullgraph=not args.deep_supervision)
-                model = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
+                model = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False, find_unused_parameters=True) if distributed else compiled_model
                 optimizers = build_optimizers(base_model, args, args.num_layers, lr_scale=scale)
                 if ema_state is not None:
                     ema_state = {k: v.clone() for k, v in base_model.state_dict().items()}
