@@ -18,7 +18,7 @@
 # =============================================================================
 set -euo pipefail
 
-REPO_URL="https://github.com/Season-Yang-NYO/parameter-golf.git"
+REPO_URL="https://github.com/xxSeasonxx/parameter-golf.git"
 BRANCH="lab/mar29"
 WORKDIR="/workspace/parameter-golf"
 RESULTS_DIR="$WORKDIR/results/h100_campaign_$(date +%Y%m%d_%H%M%S)"
