@@ -886,6 +886,7 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
+        aux_states: list[Tensor] = []
 
         # First half stores skips; second half reuses them in reverse order.
         for i in range(self.num_encoder_layers):
@@ -893,6 +894,8 @@ class GPT(nn.Module):
             vd = lora.v_loras[i] if lora else None
             x = self.blocks[i](x, x0, qd, vd)
             skips.append(x)
+            if self._deep_supervision and i in self._ds_taps:
+                aux_states.append(x)
         for i in range(self.num_decoder_layers):
             bi = self.num_encoder_layers + i
             if skips:
@@ -909,6 +912,8 @@ class GPT(nn.Module):
             qd = lora.q_loras[bi] if lora else None
             vd = lora.v_loras[bi] if lora else None
             x = self.blocks[bi](x, x0, qd, vd)
+            if self._deep_supervision and bi in self._ds_taps:
+                aux_states.append(x)
         x = self.final_norm(x)
         if self.tie_embeddings:
             logits = F.linear(x, self.tok_emb.weight)
@@ -924,7 +929,19 @@ class GPT(nn.Module):
             bsz, sl, V = logits.shape
             return F.cross_entropy(
                 logits.float().reshape(-1, V), target_ids.reshape(-1), reduction="none").reshape(bsz, sl)
-        return F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), target_ids.reshape(-1), reduction="mean")
+        main_loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), target_ids.reshape(-1), reduction="mean")
+        # Deep supervision: auxiliary losses at intermediate layers (zero new params — reuses tok_emb.weight)
+        if self._deep_supervision and aux_states:
+            emb_w = self.tok_emb.weight
+            n_aux = len(aux_states)
+            for idx, ax in enumerate(aux_states):
+                ax_norm = F.rms_norm(ax, (ax.size(-1),))
+                aux_logits = F.linear(ax_norm, emb_w)
+                aux_logits = self.logit_softcap * torch.tanh(aux_logits / self.logit_softcap)
+                aux_ce = F.cross_entropy(aux_logits.float().reshape(-1, aux_logits.size(-1)), target_ids.reshape(-1), reduction="mean")
+                weight = self._ds_alpha ** (n_aux - idx)
+                main_loss = main_loss + weight * aux_ce
+        return main_loss
 
 
 # -----------------------------
@@ -1265,6 +1282,13 @@ def main() -> None:
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
         freq_skip_gating=args.freq_skip_gating,
         freq_skip_window=args.freq_skip_window,
+        deep_supervision=args.deep_supervision,
+        deep_supervision_alpha=args.deep_supervision_alpha,
+        deep_supervision_tap_layers=(
+            [int(x) for x in args.deep_supervision_layers.split(",") if x]
+            if args.deep_supervision_layers
+            else list(range(1, args.num_layers - 1, 2))
+        ) if args.deep_supervision else None,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1272,7 +1296,7 @@ def main() -> None:
         if isinstance(module, Rotary):
             module.inv_freq.data = module.inv_freq.data.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)  # fuse ops into CUDA kernels
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=not args.deep_supervision)  # fuse ops into CUDA kernels
     # DDP wraps the model to average gradients across GPUs after each backward pass.
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
