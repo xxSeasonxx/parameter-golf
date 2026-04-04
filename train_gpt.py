@@ -1342,6 +1342,8 @@ def main() -> None:
                 if ema_state is not None:
                     ema_state = {k: v.clone() for k, v in base_model.state_dict().items()}
                 log0(f"layer_growth: rebuilt model, optimizers, EMA. New params: {sum(p.numel() for p in base_model.parameters())}")
+                if distributed:
+                    dist.barrier()  # sync all ranks before resuming training
 
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
@@ -1414,7 +1416,6 @@ def main() -> None:
     if ema_state is not None:
         log0("Loading EMA weights for final evaluation and serialization")
         base_model.load_state_dict(ema_state)
-
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
         model_bytes = os.path.getsize("final_model.pt")
@@ -1494,7 +1495,6 @@ def main() -> None:
 
     if distributed:
         dist.destroy_process_group()
-
 
 if __name__ == "__main__":
     main()
