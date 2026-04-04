@@ -19,6 +19,11 @@ import uuid
 import zlib
 from pathlib import Path
 
+try:
+    import zstandard as zstd_mod
+except ImportError:
+    zstd_mod = None
+
 import numpy as np
 import sentencepiece as spm
 import torch
@@ -85,6 +90,27 @@ class Hyperparameters:
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+
+    # --- Our proven innovations (from MLX experiments) ---
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
+    layer_lr_scale = float(os.environ.get("LAYER_LR_SCALE", 0.0))
+    mlp_mult_asymmetric = os.environ.get("MLP_MULT_ASYMMETRIC", "")
+    freq_skip_gating = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
+    freq_skip_window = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
+    qat_prewarmdown = bool(int(os.environ.get("QAT_PREWARMDOWN", "0")))
+    qat_strength = float(os.environ.get("QAT_STRENGTH", 0.1))
+    qat_stop_lr_mul = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
+    qat_every = int(os.environ.get("QAT_EVERY", 10))
+    ema_decay = float(os.environ.get("EMA_DECAY", 0.0))
+    int8_keep_float_fp16_name_patterns = os.environ.get("INT8_KEEP_FLOAT_FP16_NAME_PATTERNS", "")
+    deep_supervision = bool(int(os.environ.get("DEEP_SUPERVISION", "0")))
+    deep_supervision_alpha = float(os.environ.get("DEEP_SUPERVISION_ALPHA", 0.1))
+    deep_supervision_layers = os.environ.get("DEEP_SUPERVISION_LAYERS", "")
+    calibrated_quant = bool(int(os.environ.get("CALIBRATED_QUANT", "0")))
+    grow_layers_from = int(os.environ.get("GROW_LAYERS_FROM", 0))
+    grow_at_wallclock_frac = float(os.environ.get("GROW_AT_WALLCLOCK_FRAC", 0.35))
+    use_zstd = bool(int(os.environ.get("USE_ZSTD", "0")))
+    zstd_level = int(os.environ.get("ZSTD_LEVEL", 22))
 
     # Test-time training (LoRA) hyperparameters.
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 8))
@@ -650,9 +676,9 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    # ReLU² activation: relu then square. Sparser than GELU/SiLU (most activations are
-    # zero after relu), and squaring sharpens the surviving activations. Empirically
-    # competitive with gated MLPs at this model scale while being simpler and cheaper.
+    # LeakyReLU(0.5)² activation: leaky relu then square. Preserves 50% negative gradient
+    # flow vs ReLU², which kills all negative activations. Empirically optimal slope
+    # (validated in MLX experiments exp_066-069) while being simpler and cheaper than gated MLPs.
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         hidden = mlp_mult * dim
@@ -661,8 +687,9 @@ class MLP(nn.Module):
         self.proj._zero_init = True  # zero-init so this MLP is a no-op at initialization
 
     def forward(self, x: Tensor) -> Tensor:
-        x = torch.relu(self.fc(x))
-        return self.proj(x.square())  # relu² = relu(x)^2
+        x = self.fc(x)
+        x = torch.where(x > 0, x, 0.5 * x)  # LeakyReLU(0.5) — preserves 50% negative gradient flow
+        return self.proj(x.square())
 
 
 class Block(nn.Module):
