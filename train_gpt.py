@@ -406,6 +406,20 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
     return q, scale
 
+def sim_quant_roundtrip(w: Tensor) -> Tensor:
+    """Simulate int8 quantize→dequantize in PyTorch ops (stays on GPU)."""
+    f = w.float()
+    qmax = 127.0
+    if f.ndim == 2:
+        row_max = f.abs().amax(dim=1, keepdim=True).clamp(min=1.0 / qmax)
+        scale = row_max / qmax
+        q = (f / scale).round().clamp(-qmax, qmax)
+        return (q * scale).to(w.dtype)
+    amax = f.abs().amax().clamp(min=1.0 / qmax)
+    scale = amax / qmax
+    q = (f / scale).round().clamp(-qmax, qmax)
+    return (q * scale).to(w.dtype)
+
 def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
@@ -1270,6 +1284,12 @@ def main() -> None:
         )
         optimizers.insert(1, optimizer_head)
 
+    # EMA shadow model: exponential moving average of weights for final eval
+    ema_state = None
+    if args.ema_decay > 0:
+        ema_state = {k: v.clone() for k, v in base_model.state_dict().items()}
+        log0(f"ema:enabled decay={args.ema_decay}")
+
     n_params = sum(p.numel() for p in base_model.parameters())
     log0(f"model_params:{n_params}")
     log0(f"world_size:{world_size} grad_accum_steps:{grad_accum_steps}")
@@ -1421,6 +1441,24 @@ def main() -> None:
             opt.step()
         zero_grad_all()
 
+        # EMA update: shadow = decay * shadow + (1 - decay) * current
+        if ema_state is not None:
+            with torch.no_grad():
+                for k, v in base_model.state_dict().items():
+                    ema_state[k].lerp_(v, 1.0 - args.ema_decay)
+
+        # Pre-warmdown QAT: nudge weights toward quantized form as regularization
+        if args.qat_prewarmdown and scale >= args.qat_stop_lr_mul and step % args.qat_every == 0:
+            fp16_pats = tuple(p for p in args.int8_keep_float_fp16_name_patterns.split(",") if p)
+            with torch.no_grad():
+                for name, p in base_model.named_parameters():
+                    if not p.is_floating_point() or p.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+                        continue
+                    if fp16_pats and any(pat in name for pat in fp16_pats):
+                        continue
+                    p_q = sim_quant_roundtrip(p.data)
+                    p.data.add_(p_q - p.data, alpha=args.qat_strength)
+
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         should_log_train = (
@@ -1448,6 +1486,11 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
+
+    # Swap in EMA weights for final eval and serialization
+    if ema_state is not None:
+        log0("Loading EMA weights for final evaluation and serialization")
+        base_model.load_state_dict(ema_state)
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
