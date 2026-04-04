@@ -352,7 +352,7 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
     pattern
     for pattern in os.environ.get(
         "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights",
+        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,skip_lo_weight,skip_hi_weight",
     ).split(",")
     if pattern
 )
@@ -754,6 +754,8 @@ class GPT(nn.Module):
         rope_base: float,
         qk_gain_init: float,
         mlp_mult_asymmetric: str = "",
+        freq_skip_gating: bool = False,
+        freq_skip_window: int = 32,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -769,6 +771,11 @@ class GPT(nn.Module):
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+        self.freq_skip_gating = freq_skip_gating
+        self.freq_skip_window = freq_skip_window
+        if freq_skip_gating:
+            self.skip_lo_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+            self.skip_hi_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
         # Per-layer MLP width: asymmetric allows different encoder/decoder widths
         if mlp_mult_asymmetric:
             enc_m, dec_m = (int(x) for x in mlp_mult_asymmetric.split(","))
@@ -822,7 +829,16 @@ class GPT(nn.Module):
         for i in range(self.num_decoder_layers):
             bi = self.num_encoder_layers + i
             if skips:
-                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+                skip = skips.pop()
+                if self.freq_skip_gating:
+                    W = self.freq_skip_window
+                    s = skip.reshape(*skip.shape[:-1], -1, W)
+                    lo = s.mean(dim=-1, keepdim=True).expand_as(s).reshape(skip.shape)
+                    hi = skip - lo
+                    x = x + (self.skip_lo_weights[i].to(dtype=x.dtype)[None, None, :] * lo +
+                             self.skip_hi_weights[i].to(dtype=x.dtype)[None, None, :] * hi)
+                else:
+                    x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skip
             qd = lora.q_loras[bi] if lora else None
             vd = lora.v_loras[bi] if lora else None
             x = self.blocks[bi](x, x0, qd, vd)
@@ -1180,6 +1196,8 @@ def main() -> None:
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
         mlp_mult_asymmetric=args.mlp_mult_asymmetric,
+        freq_skip_gating=args.freq_skip_gating,
+        freq_skip_window=args.freq_skip_window,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1209,6 +1227,9 @@ def main() -> None:
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
+    if hasattr(base_model, "skip_lo_weights"):
+        scalar_params.append(base_model.skip_lo_weights)
+        scalar_params.append(base_model.skip_hi_weights)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     optimizer_tok = torch.optim.Adam(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
