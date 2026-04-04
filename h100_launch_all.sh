@@ -16,7 +16,7 @@
 # Each run saves logs to results/<run_id>/ and the final artifact.
 # Total time: ~6 runs × 10 min + data download + overhead ≈ 90 min
 # =============================================================================
-set -euo pipefail
+set -eo pipefail
 
 REPO_URL="https://github.com/xxSeasonxx/parameter-golf.git"
 BRANCH="lab/mar29"
@@ -82,7 +82,7 @@ echo "STEP 3: Downloading full dataset (195 shards)"
 echo "============================================================"
 
 EXPECTED_SHARDS=195
-ACTUAL_SHARDS=$(ls data/datasets/fineweb10B_sp1024/fineweb_train_*.bin 2>/dev/null | wc -l)
+ACTUAL_SHARDS=$(find data/datasets/fineweb10B_sp1024 -name "fineweb_train_*.bin" 2>/dev/null | wc -l || echo 0)
 
 if [ "$ACTUAL_SHARDS" -ge "$EXPECTED_SHARDS" ]; then
     echo "Dataset already complete: $ACTUAL_SHARDS shards found"
@@ -92,8 +92,8 @@ else
 fi
 
 # Verify dataset
-ACTUAL_SHARDS=$(ls data/datasets/fineweb10B_sp1024/fineweb_train_*.bin 2>/dev/null | wc -l)
-VAL_SHARDS=$(ls data/datasets/fineweb10B_sp1024/fineweb_val_*.bin 2>/dev/null | wc -l)
+ACTUAL_SHARDS=$(find data/datasets/fineweb10B_sp1024 -name "fineweb_train_*.bin" 2>/dev/null | wc -l || echo 0)
+VAL_SHARDS=$(find data/datasets/fineweb10B_sp1024 -name "fineweb_val_*.bin" 2>/dev/null | wc -l || echo 0)
 echo "Dataset: $ACTUAL_SHARDS training shards, $VAL_SHARDS validation shards"
 if [ "$ACTUAL_SHARDS" -lt "$EXPECTED_SHARDS" ]; then
     echo "WARNING: Only $ACTUAL_SHARDS/$EXPECTED_SHARDS shards downloaded!"
