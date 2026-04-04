@@ -20,7 +20,12 @@ set -euo pipefail
 
 REPO_URL="https://github.com/xxSeasonxx/parameter-golf.git"
 BRANCH="lab/mar29"
-WORKDIR="/workspace/parameter-golf"
+# Auto-detect: if we're already in the repo, use current dir. Otherwise use default.
+if [ -f "train_gpt.py" ]; then
+    WORKDIR="$(pwd)"
+else
+    WORKDIR="/workspace/parameter-golf"
+fi
 RESULTS_DIR="$WORKDIR/results/h100_campaign_$(date +%Y%m%d_%H%M%S)"
 
 # =============================================================================
@@ -30,26 +35,16 @@ echo "============================================================"
 echo "STEP 1: Repository setup"
 echo "============================================================"
 
-if [ -d "$WORKDIR" ]; then
-    cd "$WORKDIR"
-    if [ -d ".git" ]; then
-        echo "Repo already exists at $WORKDIR, fetching latest..."
-        git fetch origin
-        git checkout "$BRANCH"
-        git pull origin "$BRANCH"
-    else
-        echo "Directory exists but is not a git repo. Initializing..."
-        cd /workspace
-        rm -rf "$WORKDIR"
-        git clone "$REPO_URL" "$WORKDIR"
-        cd "$WORKDIR"
-        git checkout "$BRANCH"
-    fi
-else
-    echo "Cloning repo..."
-    git clone "$REPO_URL" "$WORKDIR"
-    cd "$WORKDIR"
+cd "$WORKDIR"
+if [ -d ".git" ]; then
+    echo "Repo found at $WORKDIR, fetching latest..."
+    git fetch origin
     git checkout "$BRANCH"
+    git pull origin "$BRANCH"
+else
+    echo "ERROR: No git repo at $WORKDIR. Clone first:"
+    echo "  git clone $REPO_URL $WORKDIR"
+    exit 1
 fi
 
 echo "Branch: $(git branch --show-current)"
