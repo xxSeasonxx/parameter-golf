@@ -30,12 +30,21 @@ echo "============================================================"
 echo "STEP 1: Repository setup"
 echo "============================================================"
 
-if [ -d "$WORKDIR/.git" ]; then
-    echo "Repo already exists at $WORKDIR, fetching latest..."
+if [ -d "$WORKDIR" ]; then
     cd "$WORKDIR"
-    git fetch origin
-    git checkout "$BRANCH"
-    git pull origin "$BRANCH"
+    if [ -d ".git" ]; then
+        echo "Repo already exists at $WORKDIR, fetching latest..."
+        git fetch origin
+        git checkout "$BRANCH"
+        git pull origin "$BRANCH"
+    else
+        echo "Directory exists but is not a git repo. Initializing..."
+        cd /workspace
+        rm -rf "$WORKDIR"
+        git clone "$REPO_URL" "$WORKDIR"
+        cd "$WORKDIR"
+        git checkout "$BRANCH"
+    fi
 else
     echo "Cloning repo..."
     git clone "$REPO_URL" "$WORKDIR"
