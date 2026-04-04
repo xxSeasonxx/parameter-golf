@@ -406,6 +406,38 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
     return q, scale
 
+def quantize_float_tensor_calibrated(tensor: Tensor) -> tuple:
+    """Per-row int8 quantization with MSE-optimal clip percentile selection.
+    Tries 5 candidate percentiles per row, picks the one minimizing reconstruction MSE."""
+    if tensor.ndim != 2:
+        return quantize_float_tensor(tensor)  # only calibrate 2D weights
+
+    f32 = tensor.detach().float().cpu()
+    rows = f32.size(0)
+    candidates = [0.999, 0.9995, 0.9999, 0.99999, 1.0]
+    best_q = torch.zeros_like(f32, dtype=torch.int8)
+    best_scale = torch.zeros(rows, dtype=torch.float32)
+
+    for row_idx in range(rows):
+        row = f32[row_idx]
+        best_mse = float('inf')
+        for clip_q in candidates:
+            if clip_q >= 1.0:
+                clip_abs = float(row.abs().max())
+            else:
+                clip_abs = float(row.abs().quantile(clip_q))
+            scale_val = max(clip_abs / 127.0, 1.0 / 127.0)
+            clipped = row.clamp(-clip_abs, clip_abs)
+            q = (clipped / scale_val).round().clamp(-127, 127).to(torch.int8)
+            recon = q.float() * scale_val
+            mse = ((row - recon) ** 2).mean().item()
+            if mse < best_mse:
+                best_mse = mse
+                best_q[row_idx] = q
+                best_scale[row_idx] = scale_val
+
+    return best_q.numpy(), best_scale.to(torch.float16).numpy()
+
 def sim_quant_roundtrip(w: Tensor) -> Tensor:
     """Simulate int8 quantize→dequantize in PyTorch ops (stays on GPU)."""
     f = w.float()
@@ -420,7 +452,7 @@ def sim_quant_roundtrip(w: Tensor) -> Tensor:
     q = (f / scale).round().clamp(-qmax, qmax)
     return (q * scale).to(w.dtype)
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+def quantize_state_dict_int8(state_dict: dict[str, Tensor], calibrated: bool = False):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -468,7 +500,12 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             continue
 
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t)
+        if calibrated and t.ndim == 2:
+            q, s = quantize_float_tensor_calibrated(t)
+            q = torch.from_numpy(q) if not isinstance(q, torch.Tensor) else q
+            s = torch.from_numpy(s) if not isinstance(s, torch.Tensor) else s
+        else:
+            q, s = quantize_float_tensor(t)
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
         quantized[name] = q
@@ -780,6 +817,9 @@ class GPT(nn.Module):
         mlp_mult_asymmetric: str = "",
         freq_skip_gating: bool = False,
         freq_skip_window: int = 32,
+        deep_supervision: bool = False,
+        deep_supervision_alpha: float = 0.1,
+        deep_supervision_tap_layers: list | None = None,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -787,6 +827,9 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self._deep_supervision = deep_supervision
+        self._ds_alpha = deep_supervision_alpha
+        self._ds_taps = set(deep_supervision_tap_layers or [])
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         # U-Net-style skip connections: the first half of layers ("encoder") stores
         # intermediate activations; the second half ("decoder") adds them back in reverse.
@@ -1517,7 +1560,7 @@ def main() -> None:
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
     # Quantize to int8 then zlib-compress: ~4x smaller than bf16, fits under the size cap.
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), calibrated=args.calibrated_quant)
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
