@@ -146,10 +146,10 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -
 
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr: float, momentum: float, backend_steps: int, nesterov: bool = True):
+    def __init__(self, params, lr: float, momentum: float, backend_steps: int, nesterov: bool = True, weight_decay: float = 0.0):
         super().__init__(
             params,
-            dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov),
+            dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov, weight_decay=weight_decay),
         )
 
     @torch.no_grad()
@@ -200,8 +200,15 @@ class Muon(torch.optim.Optimizer):
                 dist.all_reduce(updates_flat, op=dist.ReduceOp.SUM)
 
             curr = 0
+            wd = group.get("weight_decay", 0.0)
             for p in params:
                 g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
+                if wd > 0:
+                    # Warmdown-aware WD: wd_eff = base_wd * (2 - lr_mul)
+                    base_lr = group.get("base_lr", lr)
+                    lr_mul = lr / base_lr if base_lr > 0 else 1.0
+                    wd_eff = wd * (2.0 - lr_mul)
+                    p.data.mul_(1.0 - lr * wd_eff)
                 p.add_(g, alpha=-lr)
                 curr += p.numel()
 
@@ -741,6 +748,7 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        mlp_mult_asymmetric: str = "",
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -756,13 +764,19 @@ class GPT(nn.Module):
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+        # Per-layer MLP width: asymmetric allows different encoder/decoder widths
+        if mlp_mult_asymmetric:
+            enc_m, dec_m = (int(x) for x in mlp_mult_asymmetric.split(","))
+            layer_mlp_mults = [enc_m] * self.num_encoder_layers + [dec_m] * self.num_decoder_layers
+        else:
+            layer_mlp_mults = [mlp_mult] * num_layers
         self.blocks = nn.ModuleList(
             [
                 Block(
                     model_dim,
                     num_heads,
                     num_kv_heads,
-                    mlp_mult,
+                    layer_mlp_mults[i],
                     rope_base,
                     qk_gain_init,
                 )
@@ -1201,6 +1215,7 @@ def main() -> None:
         lr=args.matrix_lr,
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
+        weight_decay=args.muon_weight_decay,
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
