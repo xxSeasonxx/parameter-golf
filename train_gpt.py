@@ -152,6 +152,10 @@ class Muon(torch.optim.Optimizer):
             dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov, weight_decay=weight_decay),
         )
 
+    def set_layer_lr_scales(self, param_to_scale: dict):
+        """Set per-parameter LR multipliers for layer-dependent learning rates."""
+        self._param_lr_scales = param_to_scale
+
     @torch.no_grad()
     def step(self, closure=None):
         loss = None
@@ -203,13 +207,14 @@ class Muon(torch.optim.Optimizer):
             wd = group.get("weight_decay", 0.0)
             for p in params:
                 g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
+                lr_scale = self._param_lr_scales.get(id(p), 1.0) if hasattr(self, '_param_lr_scales') else 1.0
                 if wd > 0:
                     # Warmdown-aware WD: wd_eff = base_wd * (2 - lr_mul)
-                    base_lr = group.get("base_lr", lr)
-                    lr_mul = lr / base_lr if base_lr > 0 else 1.0
+                    base_lr_val = group.get("base_lr", lr)
+                    lr_mul = lr / base_lr_val if base_lr_val > 0 else 1.0
                     wd_eff = wd * (2.0 - lr_mul)
-                    p.data.mul_(1.0 - lr * wd_eff)
-                p.add_(g, alpha=-lr)
+                    p.data.mul_(1.0 - lr * lr_scale * wd_eff)
+                p.add_(g, alpha=-lr * lr_scale)
                 curr += p.numel()
 
         return loss
@@ -1220,6 +1225,14 @@ def main() -> None:
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
+    if args.layer_lr_scale != 0:
+        param_to_scale = {}
+        n = max(args.num_layers - 1, 1)
+        for name, p in base_model.blocks.named_parameters():
+            if p.ndim == 2 and not any(pat in name for pat in CONTROL_TENSOR_NAME_PATTERNS):
+                layer_idx = int(name.split(".")[0])
+                param_to_scale[id(p)] = 1.0 + args.layer_lr_scale * (layer_idx / n)
+        optimizer_muon.set_layer_lr_scales(param_to_scale)
     optimizer_scalar = torch.optim.Adam(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
