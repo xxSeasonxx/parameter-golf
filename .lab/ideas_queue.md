@@ -10,20 +10,28 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 
 ---
 
-## START HERE: Moonshot Sprint (exp_062-067)
+## START HERE: Minimal H100 Session
 
-**Goal**: Validate 6 experiments locally on Mac. Take winners to H100.
+**Goal**: Spend the next RunPod budget only on the highest-information runs. The local-first follow-up cycle found no shared-stack winner worth promoting.
 **Current best**: val_bpb=1.6215 (exp_063, commit e8addc5)
 **H100 best**: TTT BPB 1.2087 | Leaderboard: 1.1194 | Gap: 0.089 BPB
 
-Run these in order. Each = one commit per program.md.
+Run these in order:
 
-### Experiment 062: Progressive Layer Growing 7L→10L [ORIGINAL, HIGH IMPACT]
-**What**: Start training with 7 layers for first 50% of wallclock, then grow to 10 layers. Zero-init new layers' output projections so they start as identity.
-**Hypothesis**: 7L is ~15% faster per step → ~20% more total steps. Shallow features learned in Phase 1 transfer perfectly. Net: more total computation + pre-learned features = better BPB.
-**Code change**: Add GROW_LAYERS_FROM=7 env var. In main(), reconstruct model at 50% wallclock: copy existing block weights, add new blocks with zero-init projections, rebuild optimizer. Expand U-Net skip structure (3enc+4dec → 5enc+5dec).
-**Run**: Best config + GROW_LAYERS_FROM=7.
-**Expect**: More total steps. BPB should be within 0.005 of constant 10L — if so, the step advantage makes it a clear win on H100.
+### H100-Next-1: Clean 11L repro, no EMA [KNOWN, H100-ONLY]
+**What**: Reproduce the best known PyTorch baseline in `train_gpt.py` with full 195 shards, `int8 + zstd`, and **EMA off**.
+**Why**: Re-establish trustworthy measurement in the real scoring path before testing any new feature.
+
+### H100-Next-2: 13L int8+zstd capacity test, no EMA [KNOWN, H100-ONLY]
+**What**: Re-run the 13-layer capacity direction with `int8 + zstd` instead of int6, still with **EMA off**.
+**Why**: H100 logs already showed 13L has better pre-quant quality. The missing question is whether int8 preserves enough of that gain under the size cap.
+
+### H100-Next-3: EMA isolated on the clean 11L stack [KNOWN, H100-ONLY]
+**What**: Add `EMA_DECAY=0.997` to the clean 11L repro only. No other changes.
+**Why**: EMA is a real H100-only hypothesis, but the current code path can make it look much worse if stacked with other uncertainty. Test it in isolation.
+
+### ~~Experiment 062: Progressive Layer Growing 7L→10L~~ COMPLETED -- DISCARD
+**Result**: Tested via exp_076/076b with a forced early trigger. Even after actual growth, the run lands at **2.1457** BPB at step 200 vs baseline **2.0717**. Faster early steps do not repay the shallow-model quality debt. Kill on Mac and do not promote.
 
 ### ~~Experiment 063: LeakyReLU(0.5)²~~ COMPLETED -- NEW BEST
 **Result**: val_bpb=1.6215, -0.0084 BPB vs previous best (1.6299). Largest non-batch/non-clip win. Dead neuron elimination via 50% negative slope. Pre-quant 1.6190 (also best ever). All remaining experiments now stack on top of this win.
@@ -65,10 +73,11 @@ Run these in order. Each = one commit per program.md.
 **Result**: val_bpb=1.6659 post-quant, **+0.041 BPB regression**. 679 steps, 885ms/step. Byte weighting concentrates gradients on multi-byte tokens and under-trains frequent single-byte tokens. Standard token-level CE already optimizes BPB effectively through its correlation with per-token prediction quality. Training-eval objective mismatch is NOT the bottleneck. **Kill byte-weighted loss.**
 
 ### ~~Experiment 073: Deep Supervision~~ COMPLETED -- DISCARD (Mac), PROMISING (H100)
-**Result**: val_bpb=1.6351 post-quant, **+0.010 BPB on Mac**. 651 steps at 923ms/step (5% overhead). BUT per-step quality was BETTER (1.7223 vs 1.7307 at step 500, -0.008 BPB). The 5% overhead cost 37 steps (688→651), killing the gain. **On H100 (6000+ steps), 5% overhead = ~300 steps lost but per-step improvement compounds over 5700+ steps. Strong H100 candidate.** Uses shared embedding projection (zero new parameters). Tap layers [1,3,5,7], alpha=0.1.
+**Result**: val_bpb=1.6351 post-quant, **+0.010 BPB on Mac**. 651 steps at 923ms/step (5% overhead). BUT per-step quality was BETTER (1.7223 vs 1.7307 at step 500, -0.008 BPB). The 5% overhead cost 37 steps (688→651), killing the gain. **On H100 (6000+ steps), 5% overhead = ~300 steps lost but per-step improvement compounds over 5700+ steps.**
+**Follow-up**: A lighter variant (layers `3,7`, `alpha=0.05`) removed the overhead penalty but also removed the quality gain (`2.0766` vs baseline `2.0717` at step 200). Keep deep supervision as a low-confidence H100-only candidate, not a local winner.
 
-### ~~Experiment 074: Seq Len Curriculum~~ COMPLETED -- NEUTRAL (Mac), INTERESTING (H100)
-**Result**: val_bpb=1.6271 post-quant, **+0.002 BPB (within noise)**. 786 steps (14% more than baseline!) at 764ms avg. Phases: 230 steps@256 (654ms), 250 steps@512 (~750ms), 306 steps@1024 (~873ms). Short-sequence steps train local patterns faster but are less efficient for final BPB at seq_len=1024. Net wash on Mac. **Interesting for H100 where the extra steps from faster early phases could compound with other improvements.**
+### ~~Experiment 074: Seq Len Curriculum~~ COMPLETED -- DISCARD (Mac)
+**Result**: Original curriculum was neutral on Mac (`1.6271`). A refined follow-up schedule `256:0.10,512:0.30,1024:1.0` is worse: **703** steps and **1.6387** BPB in 600s. Kill curriculum for local iteration.
 
 ### Experiment 075: Combined Winners [STACK] — SKIPPED
 No clear winners on Mac. Deep supervision and curriculum are both H100 candidates but not additive on Mac.
@@ -78,6 +87,7 @@ No clear winners on Mac. Deep supervision and curriculum are both H100 candidate
 ## Backlog: Not Yet Run (low priority)
 
 - Zstd compression on Mac — validated on H100, saves 1.6MB. Not urgent locally.
+- Decoder-only pre-warmdown QAT [ORIGINAL, LOW PRIORITY] — smoke had a tiny win, but medium regressed to **1.6283** at 654 steps. Not worth H100 budget unless future evidence changes.
 
 ---
 

@@ -14,6 +14,8 @@ import io
 import zlib
 import traceback
 
+import pytest
+
 # Suppress DDP since we're single-process
 os.environ["WORLD_SIZE"] = "1"
 os.environ["RANK"] = "0"
@@ -29,55 +31,32 @@ sys.path.insert(0, os.path.dirname(__file__))
 # So we'll reload for each config.
 
 RUNS = {
-    "run1_proven": {
+    "clean_11l_no_ema": {
         "NUM_LAYERS": "11", "MUON_WEIGHT_DECAY": "0.10",
         "MLP_MULT_ASYMMETRIC": "2,4", "FREQ_SKIP_GATING": "1",
         "GRAD_CLIP_NORM": "0.5", "LAYER_LR_SCALE": "0.5",
         "WARMUP_STEPS": "0", "QAT_PREWARMDOWN": "1", "QAT_STRENGTH": "0.1",
         "QAT_STOP_LR_MUL": "0.8", "QAT_EVERY": "10",
-        "EMA_DECAY": "0.997", "USE_ZSTD": "0",
+        "EMA_DECAY": "0", "USE_ZSTD": "1", "ZSTD_LEVEL": "22",
         "INT8_KEEP_FLOAT_FP16_NAME_PATTERNS": "tok_emb",
     },
-    "run2_deep_capacity": {
-        "NUM_LAYERS": "13", "MUON_WEIGHT_DECAY": "0.12",
+    "capacity_13l_no_ema": {
+        "NUM_LAYERS": "13", "MUON_WEIGHT_DECAY": "0.15",
         "MLP_MULT_ASYMMETRIC": "2,4", "FREQ_SKIP_GATING": "1",
         "GRAD_CLIP_NORM": "0.5", "LAYER_LR_SCALE": "0.5",
-        "EMA_DECAY": "0.997",
+        "WARMUP_STEPS": "0", "QAT_PREWARMDOWN": "1", "QAT_STRENGTH": "0.1",
+        "QAT_STOP_LR_MUL": "0.8", "QAT_EVERY": "10",
+        "EMA_DECAY": "0", "USE_ZSTD": "1", "ZSTD_LEVEL": "22",
+        "CALIBRATED_QUANT": "1",
         "INT8_KEEP_FLOAT_FP16_NAME_PATTERNS": "tok_emb",
     },
-    "run3_training_amplifier": {
+    "ema_11l": {
         "NUM_LAYERS": "11", "MUON_WEIGHT_DECAY": "0.10",
         "MLP_MULT_ASYMMETRIC": "2,4", "FREQ_SKIP_GATING": "1",
         "GRAD_CLIP_NORM": "0.5", "LAYER_LR_SCALE": "0.5",
-        "EMA_DECAY": "0.997", "DEEP_SUPERVISION": "1",
-        "DEEP_SUPERVISION_ALPHA": "0.05", "DEEP_SUPERVISION_LAYERS": "3,7",
-        "INT8_KEEP_FLOAT_FP16_NAME_PATTERNS": "tok_emb",
-    },
-    "run4_calibrated": {
-        "NUM_LAYERS": "13", "MUON_WEIGHT_DECAY": "0.12",
-        "MLP_MULT_ASYMMETRIC": "2,4", "FREQ_SKIP_GATING": "1",
-        "GRAD_CLIP_NORM": "0.5", "LAYER_LR_SCALE": "0.5",
-        "EMA_DECAY": "0.997", "CALIBRATED_QUANT": "1",
-        "INT8_KEEP_FLOAT_FP16_NAME_PATTERNS": "tok_emb",
-    },
-    "run5_progressive": {
-        "NUM_LAYERS": "13", "MUON_WEIGHT_DECAY": "0.12",
-        "MLP_MULT_ASYMMETRIC": "2,4", "FREQ_SKIP_GATING": "1",
-        "GRAD_CLIP_NORM": "0.5", "LAYER_LR_SCALE": "0.5",
-        "EMA_DECAY": "0.997", "GROW_LAYERS_FROM": "8",
-        "GROW_AT_WALLCLOCK_FRAC": "0.35",
-        "DEEP_SUPERVISION": "1", "DEEP_SUPERVISION_ALPHA": "0.1",
-        "DEEP_SUPERVISION_LAYERS": "3,5",  # valid for 8L initial
-        "CALIBRATED_QUANT": "1",
-        "INT8_KEEP_FLOAT_FP16_NAME_PATTERNS": "tok_emb",
-    },
-    "run6_everything": {
-        "NUM_LAYERS": "13", "MUON_WEIGHT_DECAY": "0.12",
-        "MLP_MULT_ASYMMETRIC": "2,4", "FREQ_SKIP_GATING": "1",
-        "GRAD_CLIP_NORM": "0.5", "LAYER_LR_SCALE": "0.5",
-        "EMA_DECAY": "0.997", "DEEP_SUPERVISION": "1",
-        "DEEP_SUPERVISION_ALPHA": "0.05", "DEEP_SUPERVISION_LAYERS": "3,5,9,11",
-        "CALIBRATED_QUANT": "1",
+        "WARMUP_STEPS": "0", "QAT_PREWARMDOWN": "1", "QAT_STRENGTH": "0.1",
+        "QAT_STOP_LR_MUL": "0.8", "QAT_EVERY": "10",
+        "EMA_DECAY": "0.997", "USE_ZSTD": "1", "ZSTD_LEVEL": "22",
         "INT8_KEEP_FLOAT_FP16_NAME_PATTERNS": "tok_emb",
     },
     "baseline_no_features": {
@@ -106,7 +85,7 @@ def set_env(config: dict):
         os.environ[k] = v
 
 
-def test_run(name: str, config: dict) -> tuple[bool, str]:
+def run_config(name: str, config: dict) -> tuple[bool, str]:
     """Test a single run configuration. Returns (passed, message)."""
     set_env(config)
 
@@ -186,10 +165,17 @@ def test_run(name: str, config: dict) -> tuple[bool, str]:
         buf = io.BytesIO()
         torch.save(quant_obj, buf)
         raw = buf.getvalue()
-        blob = zlib.compress(raw, level=1)  # level 1 for speed in test
+        if args.use_zstd and tg.zstd_mod is not None:
+            blob = tg.zstd_mod.ZstdCompressor(level=1).compress(raw)
+        else:
+            blob = zlib.compress(raw, level=1)  # level 1 for speed in test
 
         # Decompress + dequantize
-        restored = tg.dequantize_state_dict_int8(torch.load(io.BytesIO(zlib.decompress(blob)), map_location="cpu"))
+        if args.use_zstd and tg.zstd_mod is not None:
+            raw_disk = tg.zstd_mod.ZstdDecompressor().decompress(blob)
+        else:
+            raw_disk = zlib.decompress(blob)
+        restored = tg.dequantize_state_dict_int8(torch.load(io.BytesIO(raw_disk), map_location="cpu"))
         model.load_state_dict(restored, strict=True)
 
         artifact_mb = len(blob) / 1e6
@@ -227,6 +213,12 @@ def test_run(name: str, config: dict) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
 
 
+@pytest.mark.parametrize(("name", "config"), list(RUNS.items()))
+def test_run(name: str, config: dict):
+    ok, msg = run_config(name, config)
+    assert ok, msg
+
+
 if __name__ == "__main__":
     print(f"Device: {DEVICE}")
     print(f"Batch={BATCH} Seq={SEQ} Vocab={VOCAB} Dim={DIM}")
@@ -235,7 +227,7 @@ if __name__ == "__main__":
     passed = 0
     failed = 0
     for name, config in RUNS.items():
-        ok, msg = test_run(name, config)
+        ok, msg = run_config(name, config)
         status = "PASS" if ok else "FAIL"
         if ok:
             passed += 1

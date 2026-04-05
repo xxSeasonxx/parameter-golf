@@ -9,7 +9,7 @@ commit: e8addc5
 val_bpb: 1.6215 (Apple Silicon, 10L, asymmetric MLP 2x/4x, LeakyReLU(0.5)², GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, pre-warmdown QAT)
 artifact: 13,124,539 bytes (~13.1MB, 2.9MB headroom)
 log: logs/exp_063_leakyrelu_med.txt
-next_exp: 075
+next_exp: 080
 ```
 
 **Best config env vars** (copy-paste for runs):
@@ -154,3 +154,12 @@ Three original ideas tested with A/B isolation against baseline (1.6251 post-qua
 ## Apple Silicon Plateau Analysis
 
 After 27 experiments at the current config level (exp_035-061), Apple Silicon val_bpb appeared plateaued at ~1.630 +/- 0.003. However, exp_063 (LeakyReLU(0.5)²) broke through with **1.6215**, proving that architectural improvements to capacity utilization can still deliver significant wins. The plateau was in optimization hyperparameters, not architecture. The first-principles sprint (exp_071-074) confirmed that the Mac is fully exhausted — novel training techniques can't overcome the step budget constraint. All remaining gains must come from H100.
+
+## Local-First Follow-up Cycle (exp_075-079, 2026-04-05)
+
+- **No local winner survived the cycle**: The frozen best stack remains the local control. None of the new ideas beat exp_063 / exp_071 at medium scale, so there is nothing new to port from this cycle.
+- **Progressive layer growth 7L→10L is KILLED on Mac [ORIGINAL]**: Even with an early forced trigger at 20% wallclock, growth lands at **2.1457** BPB at step 200 vs baseline **2.0717**. Faster early steps do not compensate for the shallow-model quality deficit. Do not promote this to H100 from current evidence.
+- **Lighter deep supervision is KILLED on Mac [OUR TWIST]**: Reducing to taps `[3,7]` with `alpha=0.05` removes most of the overhead but also removes the useful per-step signal. Step-200 BPB is **2.0766** vs baseline **2.0717**. This weakens the case for deep supervision variants in the local loop.
+- **Refined sequence curriculum is KILLED on Mac**: The simpler schedule `256:0.10,512:0.30,1024:1.0` reaches only **703** steps and **1.6387** BPB in 600s, worse than both the frozen baseline and the original curriculum attempt. Kill curriculum for local iteration.
+- **Decoder-only pre-warmdown QAT is interesting but KILLED on Mac [ORIGINAL]**: Restricting QAT noise to decoder blocks gives a tiny smoke win (**2.0709** vs **2.0717** at step 200) but loses at medium scale: **1.6283** BPB at **654** steps. The decoder-focused signal is real but not strong enough to pay for the extra step-time on Apple Silicon.
+- **Next H100 session should be diagnostic, not feature-stacked**: Since the local sprint found no portable winner, the next RunPod budget should go to (1) a clean 11L repro on `train_gpt.py` with full 195 shards and no EMA, (2) a 13L `int8+zstd` capacity run with no EMA, and (3) an isolated EMA run only after the clean repro is trustworthy.

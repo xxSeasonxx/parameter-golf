@@ -55,3 +55,8 @@ e8addc5	1.6446	14102619	discard	exp_070: MODEL_DIM=544 (27.2M params) — +0.023
 82f9043	1.6659	13050781	discard	exp_072: Byte-weighted loss — +0.041 BPB, concentrates gradients on multi-byte tokens, under-trains single-byte. KILLED
 82f9043	1.6351	12991732	discard	exp_073: Deep supervision (tap layers 1,3,5,7, alpha=0.1) — +0.010 BPB on Mac (5% overhead kills step count), but per-step quality better. H100 CANDIDATE
 82f9043	1.6271	13527379	discard	exp_074: Seq len curriculum (256→512→1024) — +0.002 BPB (neutral). 786 steps (+14%) but short-seq steps less efficient
+3c858b5-dirty	2.073406	13366505	keep	exp_075: Frozen baseline smoke control — 200 steps at 865ms/step, val_bpb 2.0717 at step 200, final int8 2.0734
+3c858b5-dirty	2.145700	12974399	discard	exp_076: Progressive layer growth 7L→10L (triggered at 20% wallclock) — +0.074 BPB at step 200 despite faster steps. KILLED on Mac
+3c858b5-dirty	2.076600	13371781	discard	exp_077: Lighter deep supervision (layers 3,7 alpha=0.05) — overhead fixed but quality still slightly worse than baseline
+3c858b5-dirty	1.638700	13401013	discard	exp_078: Refined curriculum 256:0.10,512:0.30,1024:1.0 — 703 steps, val_bpb 1.6387. Worse than both baseline and original curriculum
+3c858b5-dirty	1.628300	12976715	discard	exp_079: Decoder-only pre-warmdown QAT — smoke win did not survive medium; 654 steps, val_bpb 1.6283

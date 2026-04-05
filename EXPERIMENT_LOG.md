@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: exp_074 Seq Len Curriculum (NEUTRAL — +0.002 BPB, Mac exhausted)
+**Latest**: exp_079 Decoder-only QAT (DISCARD — smoke win did not survive medium)
 **H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
@@ -86,6 +86,11 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | 072 | exp_072 | Byte-weighted loss (BPB-aligned training) | 679/2000 | 1.6659 | 13.1MB | Discard | +0.041 BPB. Training-eval mismatch is NOT the bottleneck |
 | 073 | exp_073 | Deep supervision (tap layers 1,3,5,7) | 651/2000 | 1.6351 | 13.0MB | Discard (Mac) | +0.010 BPB on Mac (5% overhead kills), per-step quality better. H100 candidate |
 | 074 | exp_074 | Seq len curriculum (256→512→1024) | 786/2000 | 1.6271 | 13.5MB | Discard | +0.002 BPB (neutral). 14% more steps but short-seq less efficient |
+| 075 | exp_075_baseline_smoke | Frozen baseline smoke control | 200/200 | 2.0734 | 13.4MB | Control | Reference for the local-first cycle: 865ms/step, step-200 val_bpb 2.0717 |
+| 076 | exp_076b_growth_trigger_smoke | Progressive layer growth 7L→10L | 200/200 | 2.1457 | 13.0MB | Discard | Even with an early trigger, growth stayed materially worse than the frozen baseline |
+| 077 | exp_077_ds_light_smoke | Light deep supervision (layers 3,7 alpha=0.05) | 200/200 | 2.0766 | 13.4MB | Discard | Removed most overhead but also removed the useful signal from the original deep supervision idea |
+| 078 | exp_078_curriculum_refine_med | Refined curriculum 256:0.10,512:0.30,1024:1.0 | 703/2000 | 1.6387 | 13.4MB | Discard | Faster early phases did not survive the full 600s budget; worse than baseline and worse than the original curriculum |
+| 079 | exp_079_decoder_qat_med | Decoder-only pre-warmdown QAT | 654/2000 | 1.6283 | 13.0MB | Discard | Tiny smoke win vanished at medium scale; decoder-focused QAT signal is too small to offset step-time tax on Mac |
 
 ### H100 RunPod Runs (2026-04-03)
 
@@ -1324,6 +1329,69 @@ Re-run of current best config to establish the control reference. Result: val_bp
 **Why it was neutral**: The extra steps from faster early phases compensate for the less efficient short-sequence training, but don't exceed it. Short-sequence steps teach local n-gram patterns efficiently but miss long-range dependencies that are critical for BPB at seq_len=1024. The model needs ~200+ steps at full context to recover from the curriculum transition. Net: a wash.
 
 **Key principle**: Curriculum learning by sequence length doesn't help when total training time is wallclock-constrained. The model needs sufficient exposure to the evaluation sequence length during final convergence.
+
+### Local-First Follow-up Cycle (exp_075-079, 2026-04-05)
+
+This cycle explicitly followed a local-first funnel: freeze the best current stack, run cheap smoke tests to kill weak ideas, and only promote anything that still looks good at medium scale. The goal was not to find a miracle Mac winner, but to prevent wasting RunPod money on plausible-sounding regressions.
+
+### Experiment 075: Frozen Baseline Smoke Control
+
+The best known local stack was re-run as a control at 200 iterations: **2.0717** BPB at step 200, **2.0734** final int8 roundtrip, and **865ms/step**. This became the reference for all subsequent smoke decisions in the cycle.
+
+### Experiment 076: Progressive Layer Growth 7L→10L (Discard)
+
+**Idea**: Start shallower to buy step budget, then grow back to the best 10-layer architecture once enough cheap early updates have accumulated.
+
+**What happened**:
+- A first clean smoke with `GROW_AT_WALLCLOCK_FRAC=0.5` never reached the growth event by step 200, proving that default trigger fractions are too late for smoke tests.
+- A forced early-trigger follow-up at `0.2` did perform the `7L -> 10L` rebuild, but still landed at **2.1457** BPB vs the frozen baseline’s **2.0717**.
+- Step time was much faster (**656ms/step**) but the quality deficit from spending too much of the run at 7 layers was not recoverable inside the smoke horizon.
+
+**Conclusion**: Progressive growth is not a Mac winner. The mechanism works technically, but the quality debt is too large relative to the saved time. Do not promote.
+
+### Experiment 077: Lighter Deep Supervision (Discard)
+
+**Idea**: Preserve the original deep supervision mechanism but reduce both tap count and auxiliary-loss strength so the overhead disappears while keeping some of the per-step quality gain.
+
+**Config**: taps `[3, 7]`, `DEEP_SUPERVISION_ALPHA=0.05`.
+
+**Result**: **2.0766** BPB at step 200, slightly worse than the frozen baseline despite nearly identical step time (**862ms/step** vs **865ms/step** baseline).
+
+**Conclusion**: The lighter variant fixed the overhead problem but also removed the useful signal. This lowers confidence in local deep supervision follow-ups. If tested again, it should be treated as an H100-only question, not a Mac optimization path.
+
+### Experiment 078: Refined Sequence Curriculum (Discard)
+
+**Idea**: Shorten the early low-context phases so the run still gets meaningful exposure to `seq_len=1024`, while retaining some early cheap-step benefit.
+
+**Config**: `256:0.10,512:0.30,1024:1.0`.
+
+**What happened**:
+- Smoke was interesting: step time improved to **699ms/step** and step-200 BPB was only slightly worse (**2.0934** vs **2.0717** baseline), which justified a medium run.
+- Medium run reached only **703** steps in 600s and finished at **1.6387** BPB.
+- This is worse than both the frozen baseline and the original curriculum attempt from exp_074.
+
+**Conclusion**: Curriculum is now decisively killed for local iteration. Faster early phases are not enough if the run still spends too little wallclock on the final evaluation sequence length.
+
+### Experiment 079: Decoder-Only Pre-Warmdown QAT (Discard, Interesting)
+
+**Idea**: Restrict pre-warmdown QAT noise to decoder blocks only, concentrating the regularization on the subnetwork closest to the tied LM head while leaving the encoder path cleaner.
+
+**What happened**:
+- Smoke showed the first real signal of the cycle: **2.0709** BPB at step 200 vs baseline **2.0717**, plus slightly better train loss.
+- The medium run did not hold up: **654** steps in 600s, **1.6283** BPB.
+- The decoder-only scope seems to create a real but very small quality gain, but the extra step-time tax is enough to erase it on Apple Silicon.
+
+**Conclusion**: Interesting mechanism, but still a discard on Mac. Not strong enough to justify RunPod budget yet.
+
+### Cycle takeaway
+
+No new local winner survived medium. The value of the cycle was negative selection:
+- kill progressive growth on Mac
+- kill lighter deep supervision on Mac
+- kill refined curriculum on Mac
+- downgrade decoder-only QAT from “candidate” to “interesting but not promoted”
+
+The next H100 session should therefore be diagnostic, not feature-stacked: clean 11L repro, 13L `int8+zstd` capacity test, and isolated EMA.
 
 ---
 
