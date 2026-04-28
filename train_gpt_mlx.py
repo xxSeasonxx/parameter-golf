@@ -293,6 +293,31 @@ class RMSNormNoWeight(nn.Module):
         return rms_norm(x)
 
 
+class DyT(nn.Module):
+    """Dynamic Tanh: gamma * tanh(alpha * x) + beta.
+
+    Drop-in replacement for RMSNorm. alpha is a learnable scalar, gamma and
+    beta are learnable per-channel vectors. Reference: Zhu et al., CVPR 2025
+    (arxiv 2503.10622). Mirror of the PyTorch DyT in train_gpt.py.
+    """
+
+    def __init__(self, dim: int, alpha_init: float = 0.5):
+        super().__init__()
+        # MLX treats any mx.array attribute as a parameter (no nn.Parameter wrapper).
+        # Keep these in fp32 — alpha/gamma/beta are tiny scalars and per-channel
+        # vectors, and the MLX optimizer + quantizer paths preserve fp32 control
+        # tensors via the CONTROL_TENSOR_NAME_PATTERNS list.
+        self.alpha = mx.array(alpha_init, dtype=mx.float32)
+        self.gamma = mx.ones((dim,), dtype=mx.float32)
+        self.beta = mx.zeros((dim,), dtype=mx.float32)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return (
+            self.gamma.astype(x.dtype) * mx.tanh(self.alpha.astype(x.dtype) * x)
+            + self.beta.astype(x.dtype)
+        )
+
+
 class CausalSelfAttention(nn.Module):
     # - separate q/k/v projections
     # - RMSNorm on q and k before attention
@@ -368,8 +393,13 @@ class Block(nn.Module):
         qk_gain_init: float,
     ):
         super().__init__()
-        self.attn_norm = RMSNormNoWeight()
-        self.mlp_norm = RMSNormNoWeight()
+        # USE_DYT_NORM=1 swaps both pre-norms for Dynamic Tanh; matches PyTorch.
+        if Hyperparameters.use_dyt_norm:
+            self.attn_norm = DyT(dim)
+            self.mlp_norm = DyT(dim)
+        else:
+            self.attn_norm = RMSNormNoWeight()
+            self.mlp_norm = RMSNormNoWeight()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
@@ -429,7 +459,7 @@ class GPT(nn.Module):
             Block(dim, num_heads, num_kv_heads, layer_mlp_mults[i], rope_base, qk_gain_init)
             for i in range(num_layers)
         ]
-        self.final_norm = RMSNormNoWeight()
+        self.final_norm = DyT(dim) if Hyperparameters.use_dyt_norm else RMSNormNoWeight()
 
         for b in self.blocks:
             b.attn.proj.weight = mx.zeros_like(b.attn.proj.weight)
@@ -637,11 +667,40 @@ class SplitOptimizers:
             for k, p in params.items()
             if k.startswith("blocks.") and p.ndim == 2 and not any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)
         ]
+        # Scalar group catches:
+        #  - Top-level skip_weights / skip_lo_weights / skip_hi_weights
+        #  - Block-level scalars (1D / 0D, or matching control patterns)
+        #  - Top-level non-block scalars that are not the embedding (e.g., DyT
+        #    final_norm.alpha / final_norm.gamma / final_norm.beta when
+        #    USE_DYT_NORM=1). Without this last bucket the new norm params would
+        #    be silently dropped from optimization, training without ever
+        #    receiving a gradient step.
         self.scalar_keys = [
             k
             for k, p in params.items()
-            if k in ("skip_weights", "skip_lo_weights", "skip_hi_weights") or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
+            if (
+                k in ("skip_weights", "skip_lo_weights", "skip_hi_weights")
+                or (
+                    k.startswith("blocks.")
+                    and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS))
+                )
+                or (
+                    not k.startswith("blocks.")
+                    and k != self.embed_key
+                    and k not in ("skip_weights", "skip_lo_weights", "skip_hi_weights")
+                    and p.ndim < 2
+                )
+            )
         ]
+        # Sanity check: every learnable param must land in exactly one group, so
+        # nothing is silently skipped (especially with new norms like DyT).
+        owned = {self.embed_key} | set(self.matrix_keys) | set(self.scalar_keys)
+        leaked = [k for k in params if k not in owned]
+        if leaked:
+            raise ValueError(
+                f"SplitOptimizers leaks unowned params: {leaked}. "
+                "Add them to matrix_keys or scalar_keys."
+            )
 
         self.muon = Muon(self.matrix_keys, params, args)
         self.adam_embed = optim.Adam(
