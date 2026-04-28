@@ -108,18 +108,42 @@ class Hyperparameters:
 
 # Muon optimizer (from modded-nanogpt, see https://kellerjordan.github.io/posts/muon/)
 
-def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
-    """Map G -> UV^T (nearest orthogonal matrix) via degree-5 Newton-Schulz iteration."""
-    a, b, c = (3.4445, -4.7750, 2.0315)
+# Polar Express coefficients (Chebyshev-style minimax-optimal, ICML 2025).
+# Reference: arxiv 2505.16932; impl: github.com/Dao-AILab/gram-newton-schulz
+_POLAR_EXPRESS_COEFFS_5 = (
+    (8.28721202544396, -23.595886519098837, 17.300387312530933),
+    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+    (3.948690853482295, -2.908902115962949, 0.5518191394370137),
+    (3.318419657370526, -2.488488024314215, 0.5099255672945051),
+    (2.300652019954817, -1.665307437232293, 0.3737887369687766),
+)
+_BASELINE_NS_COEFFS = (3.4445, -4.7750, 2.0315)
+
+
+def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7,
+                                 use_polar_express: bool = False) -> Tensor:
+    """Map G -> UV^T (nearest orthogonal matrix) via degree-5 Newton-Schulz iteration.
+
+    use_polar_express: when True, use Chebyshev-minimax coefficients per iteration.
+    Otherwise: modded-nanogpt baseline (constant a, b, c).
+    """
     X = G.bfloat16()
     X /= X.norm() + eps
     transposed = G.size(0) > G.size(1)
     if transposed:
         X = X.T
-    for _ in range(steps):
-        A = X @ X.T
-        B = b * A + c * A @ A
-        X = a * X + B @ X
+    if use_polar_express:
+        for i in range(steps):
+            a, b, c = _POLAR_EXPRESS_COEFFS_5[min(i, len(_POLAR_EXPRESS_COEFFS_5) - 1)]
+            A = X @ X.T
+            B = b * A + c * A @ A
+            X = a * X + B @ X
+    else:
+        a, b, c = _BASELINE_NS_COEFFS
+        for _ in range(steps):
+            A = X @ X.T
+            B = b * A + c * A @ A
+            X = a * X + B @ X
     return X.T if transposed else X
 
 class Muon(torch.optim.Optimizer):
@@ -166,7 +190,7 @@ class Muon(torch.optim.Optimizer):
                     buf.mul_(momentum).add_(g)
                     if nesterov:
                         g = g.add(buf, alpha=momentum)
-                    g = zeropower_via_newtonschulz5(g, steps=backend_steps)
+                    g = zeropower_via_newtonschulz5(g, steps=backend_steps, use_polar_express=Hyperparameters.use_polar_express)
                     g *= max(1, g.size(0) / g.size(1)) ** 0.5
                     updates_flat[curr : curr + p.numel()] = g.reshape(-1)
                 curr += p.numel()
