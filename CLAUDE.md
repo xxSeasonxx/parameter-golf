@@ -30,10 +30,13 @@ conda run -n openai --no-capture-output python3 -m pytest test_analyze.py -v
 
 ## Files
 
-- **`train_gpt_mlx.py`** — The ONLY file modified during experiments. Model, optimizer, training loop.
-- **`train_gpt.py`** — PyTorch reference. READ-ONLY.
+- **`train_gpt_mlx.py`** — Apple Silicon experiment file. Model, optimizer, training loop.
+- **`train_gpt.py`** — H100 active development. Trusted baseline result (1.2102 BPB) is at git tag `baseline-3e34098` (commit 3e34098). For A/B comparison, check out the tag in a worktree.
 - **`analyze.py`** — Post-run analysis. READ-ONLY.
 - **`program.md`** — Experiment loop process (how to run, analyze, decide, iterate).
+- **`docs/superpowers/specs/`** — Sprint design docs.
+- **`docs/superpowers/plans/`** — Sprint implementation plans.
+- **`TODOS.md`** — Deferred research bets per sprint.
 
 ## State (single source of truth for each)
 
@@ -55,8 +58,9 @@ conda run -n openai --no-capture-output python3 -m pytest test_analyze.py -v
 
 ## Rules
 
-- Only modify `train_gpt_mlx.py`
-- Artifact must be < 16,000,000 bytes after int8+zlib
+- For Mac iteration: only modify `train_gpt_mlx.py`
+- For H100 sprint: only modify `train_gpt.py`. The trusted baseline is at git tag `baseline-3e34098`.
+- Artifact must be < 16,000,000 bytes after int8+zstd
 - Be a researcher, not a copier — develop original ideas
 - Never run experiments concurrently on Apple Silicon
 - Do NOT read `record/` — those are other teams' submissions. We develop our own approaches independently.
