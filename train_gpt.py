@@ -285,6 +285,84 @@ def eval_val(
     model.train()
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
 
+
+def eval_val_sliding(
+    args: Hyperparameters,
+    model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    grad_accum_steps: int,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[float, float]:
+    """Sliding-window evaluation: each scored token sees (seq_len - stride) of context.
+
+    For each window of `seq_len` tokens, only the last `stride` tokens are scored.
+    With stride=64 and seq_len=1024, each token gets 960 context tokens.
+
+    Cost: ~seq_len/stride more forward passes than chunked. With stride == seq_len,
+    degenerates to chunked eval.
+    """
+    stride = args.eval_stride if args.eval_stride > 0 else args.train_seq_len
+    seq_len = args.train_seq_len
+
+    n_tokens = val_tokens.numel()
+    n_windows_total = max(1, (n_tokens - seq_len) // stride + 1)
+    win_per_rank = (n_windows_total + world_size - 1) // world_size
+    win_start_idx = rank * win_per_rank
+    win_end_idx = min(win_start_idx + win_per_rank, n_windows_total)
+
+    val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    val_token_count = torch.zeros((), device=device, dtype=torch.float64)
+    val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    model.eval()
+    with torch.inference_mode():
+        for win_idx in range(win_start_idx, win_end_idx):
+            start = win_idx * stride
+            end = min(start + seq_len + 1, n_tokens)
+            local = val_tokens[start:end].to(device=device, dtype=torch.int64, non_blocking=True)
+            if local.numel() < 2:
+                continue
+            x = local[:-1].unsqueeze(0)
+            y = local[1:].unsqueeze(0)
+            with torch.autocast(
+                device_type="cuda" if device.type == "cuda" else "cpu",
+                dtype=torch.bfloat16, enabled=device.type == "cuda",
+            ):
+                batch_loss = model(x, y).detach()
+
+            n_predicted = int(end - start - 1)
+            if win_idx == 0:
+                scored_tokens = n_predicted
+                tgt_subset = y.reshape(-1)
+                prev_subset = x.reshape(-1)
+            else:
+                scored_tokens = min(stride, n_predicted)
+                tgt_subset = y.reshape(-1)[-scored_tokens:]
+                prev_subset = x.reshape(-1)[-scored_tokens:]
+
+            val_loss_sum += batch_loss.to(torch.float64) * float(scored_tokens)
+            val_token_count += float(scored_tokens)
+
+            token_bytes = base_bytes_lut[tgt_subset].to(dtype=torch.int16)
+            token_bytes += (has_leading_space_lut[tgt_subset] & ~is_boundary_token_lut[prev_subset]).to(dtype=torch.int16)
+            val_byte_count += token_bytes.to(torch.float64).sum()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_byte_count, op=dist.ReduceOp.SUM)
+
+    val_loss = val_loss_sum / val_token_count
+    bits_per_token = val_loss.item() / math.log(2.0)
+    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    model.train()
+    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
 # Post-training int8 quantization + compression.
 
 CONTROL_TENSOR_NAME_PATTERNS = tuple(
