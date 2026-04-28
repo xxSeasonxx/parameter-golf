@@ -98,6 +98,10 @@ class Hyperparameters:
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 1024))
     ttt_batch_size = int(os.environ.get("TTT_BATCH_SIZE", 64))
 
+    # Sliding window evaluation: each scored token gets (seq_len - eval_stride) of context.
+    # 0 disables sliding window. 64 is the competition-best stride.
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 0))
+
 # Muon optimizer (from modded-nanogpt, see https://kellerjordan.github.io/posts/muon/)
 
 def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
