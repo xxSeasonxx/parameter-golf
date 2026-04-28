@@ -160,3 +160,18 @@ Ordered roughly by expected value-per-cost.
 - **DiffAttn × shared-KV in original L2 plan**: independent Claude subagent showed that sharing K (forced by GQA) breaks the noise-cancellation prior structurally. `A1 - λ·A2` becomes near-rescaling, not noise subtraction. Replace with Gated Output Attention (#2 above) when ready.
 - **Post-hoc PTQ sensitivity sweep**: would measure PTQ-int4 sensitivity, not LSQ-int4 sensitivity. See LSQ entry (#1) for corrected design.
 - **Stacked 1-PR plan**: split decisions to 3 PRs, then redirected to 1 cheap-winners PR. Follow-up bets each get their own.
+
+## Deferred from refactor pass (2026-04-28)
+
+These items are confirmed OURS (not in upstream `openai/parameter-golf` main) but were left in `train_gpt.py` rather than moved to `train_gpt_common.py` because:
+- They are PyTorch-only (no MLX equivalents → moving them gives zero deduplication benefit).
+- They reference upstream-derived classes (`Muon`, `GPT`) defined locally in `train_gpt.py`, so moving them creates circular-import risk.
+
+**Items left in `train_gpt.py`:**
+- `BatchedLinearLoRA`, `BatchedTTTLoRA`, `_build_ttt_optimizer`, `_reset_ttt_optimizer`, `_find_docs`, `_compute_chunk_window`, `_accumulate_bpb`, `eval_val_ttt_lora` — TTT support stack (~250 lines).
+- `grow_model` — progressive layer growth helper. Constructs a new GPT, references many `args` fields and the local GPT class.
+- `build_optimizers` — Muon + Adam optimizer construction. References local `Muon` class (upstream-derived, must stay in `train_gpt.py`).
+
+**Revisit triggers:** if MLX ever gets a TTT path, or if we extract the GPT factory into common, these become mechanical moves.
+
+**Sliding-window window-list:** `compute_sliding_windows` was sketched but not landed because the two `eval_val_sliding` implementations (PyTorch per-window, MLX batched) use different conventions for `n_tokens` (one passes `val_tokens.numel()`, the other `val_tokens.size - 1`). Reconciling would require code-level changes to one of the eval paths. Module docstring of `compute_bpb_from_sums` records this for the next refactor.
