@@ -13,7 +13,6 @@ import os
 import pickle
 import sys
 import time
-import uuid
 import zlib
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +24,17 @@ import mlx.core as mx  # MLX arrays are lazily evaluated — ops build a compute
 import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_flatten, tree_unflatten  # MLX uses nested dicts for params; these flatten/unflatten them
+
+from train_gpt_common import (
+    Hyperparameters as _CommonHyperparameters,
+    POLAR_EXPRESS_COEFFS_5,
+    BASELINE_NS_COEFFS,
+    CONTROL_TENSOR_NAME_PATTERNS,
+    INT8_KEEP_FLOAT_FP32_NAME_PATTERNS,
+    INT8_KEEP_FLOAT_MAX_NUMEL,
+    INT8_CLIP_PERCENTILE,
+    INT8_CLIP_Q,
+)
 
 # ==============================================================================
 # SHARD FORMAT + COMPUTE DTYPE
@@ -41,105 +51,39 @@ COMPUTE_DTYPE = mx.bfloat16
 # - 8 attention heads with 4 KV heads (GQA) and 2x MLP expansion
 # - vocab size 1024, sequence length 1024, tied embeddings
 # - 524,288 train tokens per step for 20,000 iterations with a ~10 minute cap
-class Hyperparameters:
-    # Data / tokenizer.
-    data_path: str = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
-    tokenizer_path: str = os.environ.get("TOKENIZER_PATH", "./data/tokenizers/fineweb_1024_bpe.model")
-    run_id: str = os.environ.get("RUN_ID", str(uuid.uuid4()))
-    seed: int = int(os.environ.get("SEED", 1337))
+#
+# The shared env-var fields (model architecture, optimizer, QAT, deep supervision,
+# eval_stride, use_polar_express, use_dyt_norm, etc.) live on the common base
+# class. This file overrides MLX-specific defaults and adds MLX-only fields.
+class Hyperparameters(_CommonHyperparameters):
+    # MLX defaults to no in-loop validation (rely on the final eval after warmdown);
+    # the common base defaults to 1000 to match PyTorch. Preserve MLX's behavior.
+    val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 0))
+    # MLX historically accepted TRAIN_MAX_SEQ_LEN as a fallback; keep it.
+    train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024)))
 
-    # Training loop. These defaults now mirror train_gpt.py on a single process.
-    iterations: int = int(os.environ.get("ITERATIONS", 20_000))
-    val_loss_every: int = int(os.environ.get("VAL_LOSS_EVERY", 0))
-    # Validation always uses the full fineweb_val split.
-    val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
-    train_log_every: int = int(os.environ.get("TRAIN_LOG_EVERY", 200))
-    train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
-    grad_accum_steps: int = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
-    train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024)))
+    # MLX-only memory and graph control fields.
+    grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
     # Chunk each logical MLX microbatch into smaller sub-batches to reduce peak
     # memory pressure without changing the effective optimizer batch.
-    # MLX-specific: controls sub-batch size within each grad_accum microbatch.
-    # Smaller values reduce peak memory by forcing earlier graph materialization.
-    mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
+    mlx_max_microbatch_tokens = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
     # Force MLX to materialize the graph after every sub-batch, preventing lazy
     # graph buildup across accumulation steps. Keeps peak memory low on 16GB machines.
     # Disable on 32GB+ unified memory for better throughput (MLX_EAGER_EVAL=0).
-    # When True, calls mx.eval() after each sub-batch to materialize the lazy graph immediately.
-    # Without this, MLX accumulates a huge graph across all sub-batches, spiking memory usage.
-    mlx_eager_eval: bool = bool(int(os.environ.get("MLX_EAGER_EVAL", "1")))
-    warmup_steps: int = int(os.environ.get("WARMUP_STEPS", 20))
-    warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 1200))
-    max_wallclock_seconds: float = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
-
-    # Model (defaults match the current baseline setup).
-    vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
-    num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
-    model_dim: int = int(os.environ.get("MODEL_DIM", 512))
-    num_heads: int = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
-    mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
-    # Asymmetric MLP: separate multipliers for encoder and decoder halves.
-    # If set, overrides mlp_mult. Format: "encoder_mult,decoder_mult" e.g. "2,4"
-    mlp_mult_asymmetric: str = os.environ.get("MLP_MULT_ASYMMETRIC", "")
-    tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
-    tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
-    logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
-    logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
-    rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
-    qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
-    freq_skip_gating: bool = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
-    freq_skip_window: int = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
-
-    # Optimizer. We keep the same per-group defaults as train_gpt.py.
-    beta1: float = float(os.environ.get("BETA1", 0.9))
-    beta2: float = float(os.environ.get("BETA2", 0.95))
-    adam_eps: float = float(os.environ.get("ADAM_EPS", 1e-8))
-    tied_embed_lr: float = float(os.environ.get("TIED_EMBED_LR", 0.05))
-    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.04))
-    scalar_lr: float = float(os.environ.get("SCALAR_LR", 0.04))
-    muon_momentum: float = float(os.environ.get("MUON_MOMENTUM", 0.95))
-    muon_backend_steps: int = int(os.environ.get("MUON_BACKEND_STEPS", 5))
-    muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
-    muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
-    muon_weight_decay: float = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
-    grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
-    # Per-layer LR scaling: deeper layers get higher LR. 0=disabled.
-    # lr_layer_i = base_lr * (1 + layer_lr_scale * i / (num_layers - 1))
-    layer_lr_scale: float = float(os.environ.get("LAYER_LR_SCALE", 0.0))
-
-    # QAT: quantization-aware training. Nudges weights toward their quantized form.
-    # Only active during pre-warmdown (lr_mul >= qat_stop_lr_mul).
-    qat_prewarmdown: bool = bool(int(os.environ.get("QAT_PREWARMDOWN", "0")))
-    qat_strength: float = float(os.environ.get("QAT_STRENGTH", 0.1))
-    qat_stop_lr_mul: float = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
-    qat_every: int = int(os.environ.get("QAT_EVERY", 10))
+    mlx_eager_eval = bool(int(os.environ.get("MLX_EAGER_EVAL", "1")))
+    logit_chunk_tokens = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
 
     # Byte-weighted loss: weight each token's CE by its decoded byte count.
     # Directly optimizes BPB instead of token-level CE.
-    byte_weighted_loss: bool = bool(int(os.environ.get("BYTE_WEIGHTED_LOSS", "0")))
-    byte_weight_clamp_lo: float = float(os.environ.get("BYTE_WEIGHT_CLAMP_LO", 0.5))
-    byte_weight_clamp_hi: float = float(os.environ.get("BYTE_WEIGHT_CLAMP_HI", 3.0))
-
-    # Deep supervision: add auxiliary next-token prediction losses at intermediate layers.
-    # Uses shared embedding for projections (zero new parameters). Auxiliary losses use
-    # geometric decay weighting: alpha^(n_taps - i) for tap i.
-    deep_supervision: bool = bool(int(os.environ.get("DEEP_SUPERVISION", "0")))
-    deep_supervision_alpha: float = float(os.environ.get("DEEP_SUPERVISION_ALPHA", 0.1))
-    # Comma-separated layer indices to tap. Default: every 2nd layer starting from 1.
-    deep_supervision_layers: str = os.environ.get("DEEP_SUPERVISION_LAYERS", "")
+    byte_weighted_loss = bool(int(os.environ.get("BYTE_WEIGHTED_LOSS", "0")))
+    byte_weight_clamp_lo = float(os.environ.get("BYTE_WEIGHT_CLAMP_LO", 0.5))
+    byte_weight_clamp_hi = float(os.environ.get("BYTE_WEIGHT_CLAMP_HI", 3.0))
 
     # Sequence length curriculum: progressive seq_len phases based on wallclock fraction.
     # Format: "seq_len:end_fraction,..." e.g. "256:0.25,512:0.55,1024:1.0"
-    # Phases must be in ascending order of both seq_len and fraction.
-    seq_len_curriculum: str = os.environ.get("SEQ_LEN_CURRICULUM", "")
+    seq_len_curriculum = os.environ.get("SEQ_LEN_CURRICULUM", "")
 
-    # Sliding window evaluation: score each token with (seq_len - stride) tokens of context.
-    # stride=0 disables sliding window (default, non-overlapping chunks).
-    # stride=64 matches the competition's best evaluation strategy.
-    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 0))
-
-    out_dir: str = os.environ.get("OUT_DIR", "logs")
+    out_dir = os.environ.get("OUT_DIR", "logs")
 
     @property
     def train_files(self) -> str:
@@ -163,24 +107,6 @@ class Hyperparameters:
         warmdown_ms = self.warmdown_iters * step_ms
         remaining_ms = max(1000.0 * self.max_wallclock_seconds - elapsed_ms, 0.0)
         return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
-
-
-CONTROL_TENSOR_NAME_PATTERNS = tuple(
-    pattern
-    for pattern in os.environ.get(
-        "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights",
-    ).split(",")
-    if pattern
-)
-INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = tuple(
-    pattern
-    for pattern in os.environ.get(
-        "INT8_KEEP_FLOAT_FP32_NAME_PATTERNS",
-        ",".join(CONTROL_TENSOR_NAME_PATTERNS),
-    ).split(",")
-    if pattern
-)
 
 
 def token_chunks(total_tokens: int, seq_len: int, max_chunk_tokens: int) -> list[int]:
@@ -755,7 +681,6 @@ MX_DTYPE_FROM_NAME = {
 
 QUANT_BITS = int(os.environ.get("QUANT_BITS", 8))
 QUANT_MAX_VAL = {6: 31, 8: 127}[QUANT_BITS]  # 2^(bits-1) - 1
-INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
 # Tensors matching these patterns are kept as FP16 regardless of size (not int8 quantized).
 # Use for critical tensors like tied embeddings where quantization error hurts disproportionately.
 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS = tuple(
@@ -763,8 +688,7 @@ INT8_KEEP_FLOAT_FP16_NAME_PATTERNS = tuple(
 ) if os.environ.get("INT8_KEEP_FLOAT_FP16_NAME_PATTERNS") else ()
 INT8_KEEP_FLOAT_STORE_DTYPE = np.float16
 INT8_PER_ROW_SCALE_DTYPE = np.float16
-INT8_CLIP_PERCENTILE = 99.99984
-INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+# INT8_KEEP_FLOAT_MAX_NUMEL, INT8_CLIP_PERCENTILE, INT8_CLIP_Q come from train_gpt_common.
 
 
 def sim_quant_roundtrip(w: mx.array) -> mx.array:
