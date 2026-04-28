@@ -1002,6 +1002,7 @@ class BatchedLinearLoRA(nn.Module):
             self.A.uniform_(-bound, bound)
             self.B.zero_()
 
+# Compatible with DyT (replaces RMSNorm only; attn weight slots c_q, c_v unchanged).
 class BatchedTTTLoRA(nn.Module):
     def __init__(self, bsz: int, model: GPT, rank: int):
         super().__init__()
