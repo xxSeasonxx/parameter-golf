@@ -36,7 +36,14 @@ from train_gpt_common import (
     INT8_KEEP_FLOAT_MAX_NUMEL,
     INT8_CLIP_PERCENTILE,
     INT8_CLIP_Q,
+    get_ds_tap_layers,
+    get_compression_name,
+    describe_feature_flags,
+    final_eval_weight_source,
 )
+# Backwards-compat alias (we kept the underscore-prefixed name for callers
+# inside this module; common drops the underscore).
+_get_ds_tap_layers = get_ds_tap_layers
 
 
 class Hyperparameters(_CommonHyperparameters):
@@ -731,51 +738,6 @@ class Block(nn.Module):
         x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * attn_out
         x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
         return x
-
-
-def _get_ds_tap_layers(args, num_layers: int) -> list | None:
-    """Compute deep-supervision tap layer indices from args."""
-    if not args.deep_supervision:
-        return None
-    if args.deep_supervision_layers:
-        return [int(x) for x in args.deep_supervision_layers.split(",") if x]
-    return list(range(1, num_layers - 1, 2))
-
-
-def get_compression_name(args, zstd_available: bool | None = None) -> str:
-    if zstd_available is None:
-        zstd_available = zstd_mod is not None
-    if args.use_zstd and zstd_available:
-        return f"zstd-{args.zstd_level}"
-    return "zlib-9"
-
-
-def describe_feature_flags(args, effective_num_layers: int, zstd_available: bool | None = None) -> list[str]:
-    lines = [
-        "feature_flags: "
-        f"ema={'on' if args.ema_decay > 0 else 'off'} "
-        f"calibrated_quant={'on' if args.calibrated_quant else 'off'} "
-        f"compression={get_compression_name(args, zstd_available=zstd_available)} "
-        f"deep_supervision={'on' if args.deep_supervision else 'off'} "
-        f"layer_growth={'on' if args.grow_layers_from > 0 else 'off'}"
-    ]
-    if args.deep_supervision:
-        tap_layers = _get_ds_tap_layers(args, effective_num_layers)
-        lines.append(
-            f"deep_supervision:alpha={args.deep_supervision_alpha:.2f} tap_layers={tap_layers}"
-        )
-    if args.grow_layers_from > 0:
-        lines.append(
-            "layer_growth:"
-            f"start_layers={args.grow_layers_from} "
-            f"target_layers={args.num_layers} "
-            f"grow_at_frac={args.grow_at_wallclock_frac:.3f}"
-        )
-    return lines
-
-
-def final_eval_weight_source(ema_enabled: bool) -> str:
-    return "ema" if ema_enabled else "live"
 
 
 class GPT(nn.Module):

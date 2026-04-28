@@ -147,3 +147,63 @@ INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
 # sacrificing negligible amplitude on outliers.
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+
+
+# ============================================================================
+# PURE-PYTHON FEATURE-FLAG HELPERS (framework-agnostic)
+# ============================================================================
+# These helpers route on Hyperparameters fields and produce strings/lists for
+# logging. They have no torch or mlx dependency and are shared by both train
+# scripts.
+
+def get_ds_tap_layers(args, num_layers: int) -> list | None:
+    """Compute deep-supervision tap layer indices from args."""
+    if not args.deep_supervision:
+        return None
+    if args.deep_supervision_layers:
+        return [int(x) for x in args.deep_supervision_layers.split(",") if x]
+    return list(range(1, num_layers - 1, 2))
+
+
+def get_compression_name(args, zstd_available: bool | None = None) -> str:
+    """Return the compression algorithm label used for the final artifact."""
+    if zstd_available is None:
+        # Local lazy import: zstd is an optional dep, callers may not have it.
+        try:
+            import zstandard as _zstd_mod
+            zstd_available = _zstd_mod is not None
+        except ImportError:
+            zstd_available = False
+    if args.use_zstd and zstd_available:
+        return f"zstd-{args.zstd_level}"
+    return "zlib-9"
+
+
+def describe_feature_flags(args, effective_num_layers: int, zstd_available: bool | None = None) -> list[str]:
+    """Render the feature_flags log lines for run startup."""
+    lines = [
+        "feature_flags: "
+        f"ema={'on' if args.ema_decay > 0 else 'off'} "
+        f"calibrated_quant={'on' if args.calibrated_quant else 'off'} "
+        f"compression={get_compression_name(args, zstd_available=zstd_available)} "
+        f"deep_supervision={'on' if args.deep_supervision else 'off'} "
+        f"layer_growth={'on' if args.grow_layers_from > 0 else 'off'}"
+    ]
+    if args.deep_supervision:
+        tap_layers = get_ds_tap_layers(args, effective_num_layers)
+        lines.append(
+            f"deep_supervision:alpha={args.deep_supervision_alpha:.2f} tap_layers={tap_layers}"
+        )
+    if args.grow_layers_from > 0:
+        lines.append(
+            "layer_growth:"
+            f"start_layers={args.grow_layers_from} "
+            f"target_layers={args.num_layers} "
+            f"grow_at_frac={args.grow_at_wallclock_frac:.3f}"
+        )
+    return lines
+
+
+def final_eval_weight_source(ema_enabled: bool) -> str:
+    """Return the label of the weight source used for the final-eval pass."""
+    return "ema" if ema_enabled else "live"
