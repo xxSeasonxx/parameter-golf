@@ -43,6 +43,7 @@ from train_gpt_common import (
     sim_quant_roundtrip_torch as sim_quant_roundtrip,
     quantize_float_tensor_calibrated_torch,
     DyTTorch as DyT,
+    compute_bpb_from_sums,
 )
 # Backwards-compat alias (we kept the underscore-prefixed name for callers
 # inside this module; common drops the underscore).
@@ -262,11 +263,11 @@ def eval_val(
         dist.all_reduce(val_token_count, op=dist.ReduceOp.SUM)
         dist.all_reduce(val_byte_count, op=dist.ReduceOp.SUM)
 
-    val_loss = val_loss_sum / val_token_count
-    bits_per_token = val_loss.item() / math.log(2.0)
-    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    val_loss_f, val_bpb = compute_bpb_from_sums(
+        val_loss_sum.item(), val_token_count.item(), val_byte_count.item()
+    )
     model.train()
-    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+    return float(val_loss_f), float(val_bpb)
 
 
 def eval_val_sliding(
@@ -340,11 +341,11 @@ def eval_val_sliding(
         dist.all_reduce(val_token_count, op=dist.ReduceOp.SUM)
         dist.all_reduce(val_byte_count, op=dist.ReduceOp.SUM)
 
-    val_loss = val_loss_sum / val_token_count
-    bits_per_token = val_loss.item() / math.log(2.0)
-    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    val_loss_f, val_bpb = compute_bpb_from_sums(
+        val_loss_sum.item(), val_token_count.item(), val_byte_count.item()
+    )
     model.train()
-    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+    return float(val_loss_f), float(val_bpb)
 
 # Post-training int8 quantization + compression.
 # Pattern tuples + numerical constants come from train_gpt_common; only the

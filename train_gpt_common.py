@@ -232,6 +232,31 @@ def final_eval_weight_source(ema_enabled: bool) -> str:
     return "ema" if ema_enabled else "live"
 
 
+def compute_bpb_from_sums(
+    total_loss_sum: float,
+    total_scored_tokens: float,
+    total_bytes: float,
+) -> tuple[float, float]:
+    """Final BPB math used by every eval path (chunked + sliding, both frameworks).
+
+    Returns (val_loss, val_bpb). Inputs are scalar floats already reduced across
+    ranks/devices. Uses math.log(2) so byte-level units are correct regardless
+    of where the inputs came from.
+
+    Note: window-list construction is intentionally NOT shared. The two
+    eval_val_sliding implementations (PyTorch per-window, MLX batched) use
+    different control-flow shapes; forcing them through a common window helper
+    would risk regressing a verified eval path. If we ever want to unify, fix
+    the off-by-one between conventions first (PyTorch passes val_tokens.numel(),
+    MLX uses val_tokens.size - 1).
+    """
+    import math
+    val_loss = total_loss_sum / total_scored_tokens
+    bits_per_token = val_loss / math.log(2.0)
+    tokens_per_byte = total_scored_tokens / total_bytes
+    return val_loss, bits_per_token * tokens_per_byte
+
+
 # ============================================================================
 # QAT-REGULARIZER + CALIBRATED-INT8-QUANT HELPERS (framework-typed)
 # ============================================================================

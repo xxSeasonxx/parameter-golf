@@ -36,6 +36,7 @@ from train_gpt_common import (
     INT8_CLIP_Q,
     sim_quant_roundtrip_mlx,
     DyTMLX as DyT,
+    compute_bpb_from_sums,
 )
 
 # ==============================================================================
@@ -1025,10 +1026,7 @@ def eval_val(
             batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
         ):
             log_fn(f"val_progress:{batch_idx}/{total_batches}")
-    val_loss = total_loss_sum / total_tokens
-    bits_per_token = val_loss / math.log(2.0)
-    val_bpb = bits_per_token * (total_tokens / total_bytes)
-    return val_loss, val_bpb
+    return compute_bpb_from_sums(total_loss_sum, total_tokens, total_bytes)
 
 
 def eval_val_sliding(
@@ -1118,10 +1116,7 @@ def eval_val_sliding(
         ):
             log_fn(f"val_progress:{batch_idx}/{total_batches}")
 
-    val_loss = total_loss_sum / total_scored_tokens
-    bits_per_token = val_loss / math.log(2.0)
-    val_bpb = bits_per_token * (total_scored_tokens / total_bytes)
-    return val_loss, val_bpb
+    return compute_bpb_from_sums(total_loss_sum, total_scored_tokens, total_bytes)
 
 
 # -----------------------------
