@@ -6,7 +6,7 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
 **Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: exp_079 Decoder-only QAT (DISCARD — smoke win did not survive medium)
+**Latest**: H100 repro cycle (clean 11L full-shard baseline established; 13L recipe and EMA discarded)
 **H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
 
 ---
@@ -99,6 +99,9 @@ This document records all experiments conducted during the `lab/mar26b` session,
 | H100-1 | 11L int8 zlib (baseline) | 6421 | 1.2250 | 1.2302 | **1.2087** | 15.8MB | Best | Baseline established. Gap to leaderboard: 0.089 BPB |
 | H100-2 | 13L int6 zstd (capacity) | 5418 | **1.2145** | 1.3066 | 1.2765 | 9.9MB | Discard | Best pre-quant but int6 gap +0.092 destroys it. Int6 KILLED |
 | H100-3 | 11L int8 zstd + SWA | 6420 | 1.2260 | 1.2322 | 1.2107 | 14.2MB | Discard | SWA (23 snapshots) gives +0.002 regression. SWA KILLED EVERYWHERE |
+| H100-4 | 11L int8 zstd, no EMA, full 195 shards | 8007 | 1.2282 | 1.2316 | **1.2102** | 14.48MB | Keep | Trusted clean baseline repro. Full-shard runner is now validated |
+| H100-5 | 13L int8 zstd + calibrated quant, no EMA | 6984 | 1.2387 | 1.2442 | 1.2280 | 14.74MB | Discard | Current 13L recipe is worse than 11L on raw, post-quant, and TTT |
+| H100-6 | 11L int8 zstd + EMA(0.997) | 7919 | 1.2291 | 1.3724 | 1.3035 | 14.54MB | Discard | EMA collapses only at final eval. EMA KILLED in this codebase |
 
 ---
 
@@ -1392,6 +1395,57 @@ No new local winner survived medium. The value of the cycle was negative selecti
 - downgrade decoder-only QAT from “candidate” to “interesting but not promoted”
 
 The next H100 session should therefore be diagnostic, not feature-stacked: clean 11L repro, 13L `int8+zstd` capacity test, and isolated EMA.
+
+### H100 Diagnostic Repro Cycle (2026-04-05)
+
+This cycle finally answered the high-value H100 questions cleanly by removing the two biggest sources of ambiguity from earlier runs: partial data coverage and feature-stacked scripts.
+
+### H100-4: Clean 11L full-shard repro (Keep)
+
+**Config**: 11L, `int8+zstd-22`, full `195/195` shards, `EMA_DECAY=0`, no deep supervision, no growth, no stacked novelty.
+
+**Result**:
+- `8007` steps in `600s` at **74.95ms/step**
+- raw BPB **1.2282**
+- post-quant BPB **1.2316**
+- TTT BPB **1.2102**
+- artifact **14.48MB**
+
+**Meaning**: This is the new trusted H100 anchor. It reproduces the earlier 80-shard `1.2087` regime closely enough that the old runner/data doubts are no longer the main blocker.
+
+### H100-5: 13L int8+zstd + calibrated quant (Discard)
+
+**Config**: 13L, `MUON_WEIGHT_DECAY=0.15`, `CALIBRATED_QUANT=1`, `EMA_DECAY=0`, otherwise matched to the clean 11L run.
+
+**Result**:
+- `6984` steps in `600s` at **85.92ms/step**
+- raw BPB **1.2387**
+- post-quant BPB **1.2442**
+- TTT BPB **1.2280**
+- artifact **14.74MB**
+
+**Meaning**: The current 13L recipe is not just failing on quantization; it is worse than 11L at raw quality too. The “more depth under int8” story is falsified for this exact recipe.
+
+### H100-6: 11L + EMA(0.997) isolated (Discard)
+
+**Config**: clean 11L baseline plus `EMA_DECAY=0.997`, no other changes.
+
+**Result**:
+- raw BPB stays normal at **1.2291**
+- final eval explicitly switches to EMA weights
+- post-quant BPB collapses to **1.3724**
+- TTT BPB collapses to **1.3035**
+
+**Meaning**: EMA is now decisively killed in this codebase. This is not a logging bug or a feature-stack interaction; the isolated A/B answered the question directly.
+
+### Repro-cycle takeaway
+
+The repro cycle did not produce a new leaderboard candidate, but it did remove major uncertainty:
+- 11L full-shard baseline is trusted
+- 13L current recipe is dead
+- EMA(0.997) is dead
+
+That sharply narrows the next H100 move: if we spend more budget, it should be on a clean 11L H100-only idea such as deep supervision or a TTT improvement, not another capacity or averaging attempt.
 
 ---
 

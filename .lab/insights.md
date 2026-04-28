@@ -110,7 +110,7 @@ Three comparative runs on 8xH100 (80/195 shards, 524K batch, 600s wallclock):
 | 3 | 11L int8 zstd + SWA (23 snapshots) | 6420 | 1.2260 | 1.2322 | 1.2107 | 14.2MB |
 
 **Key learnings**:
-- **SWA is DEAD everywhere**: 23 H100 snapshots gave +0.002 BPB regression. Killed for good. Need EMA instead (decay=0.997, every step — all top teams use this).
+- **SWA is DEAD everywhere**: 23 H100 snapshots gave +0.002 BPB regression. Killed for good.
 - **Int6 is DEAD without STE/GPTQ**: Quant gap +0.092 on H100 (worse than Mac's +0.063). Pre-quant was best (1.2145) but quant destroys it.
 - **Zstd-22 saves ~1.6MB for free**: 15.8MB (zlib) → 14.2MB (zstd). Always use.
 - **13L pre-quant is better**: 1.2145 vs 1.2250 (-0.0105) from 2 extra layers. But needs int8 to realize it.
@@ -118,15 +118,36 @@ Three comparative runs on 8xH100 (80/195 shards, 524K batch, 600s wallclock):
 - **Step time 93ms/step**: Top teams achieve 83-85ms/step with parameter banking.
 - **Still improving at wallclock cap**: ~-0.19 BPB/1000 steps at step 6400. More steps = better.
 
+## H100 Diagnostic Repro Cycle (2026-04-05)
+
+Three-run full-shard repro cycle on commit `3e34098` using the cleaned `train_gpt.py` logging path and `h100_repro.sh`:
+
+| Run | Config | Steps | Raw BPB | Post-quant BPB | TTT BPB | Artifact |
+|-----|--------|-------|---------|----------------|---------|----------|
+| 1 | clean 11L, no EMA | 8007 | 1.2282 | 1.2316 | **1.2102** | 14.48MB |
+| 2 | 13L int8+zstd + calibrated quant, no EMA | 6984 | 1.2387 | 1.2442 | 1.2280 | 14.74MB |
+| 3 | 11L + EMA(0.997) | 7919 | 1.2291 | 1.3724 | 1.3035 | 14.54MB |
+
+**Key learnings**:
+- **Clean 11L full-shard repro is trustworthy**: `195/195` shards, `8007` steps, `74.95ms/step`, post-quant `1.2316`, TTT `1.2102`. This essentially reproduces the earlier `1.2087` partial-shard result while removing the old data-coverage and runner-integrity doubts.
+- **13L current recipe is DEAD**: With `int8+zstd` and `CALIBRATED_QUANT=1`, 13L is worse than clean 11L on raw, post-quant, and TTT, while also running slower (`85.92ms/step`). Do not assume “more depth under int8” is the next answer.
+- **EMA(0.997) is DEAD in this codebase**: The EMA run reaches a normal raw checkpoint (`1.2291`) but collapses after the explicit final EMA load to post-quant `1.3724` and TTT `1.3035`. The issue is not measurement anymore; EMA is genuinely harmful here.
+- **Zstd-22 remains free headroom**: All three runs stay safely under `16MB` with artifacts in the `14.48–14.74MB` range.
+- **Throughput is no longer the main blocker for 11L**: The clean 11L run already hits `8007` steps in `600s`, much better than the old 80-shard baseline's `6421` steps. The next gains likely need a better ML/eval idea, not just a cleaner runner.
+
 ## Competition Strategy (8xH100 target: ≤1.12 BPB)
 
-**Leaderboard top**: 1.1194. Our best H100 result: **1.2087 TTT BPB**. Gap: **0.089 BPB**.
+**Leaderboard top**: 1.1194. Our best trustworthy H100 result is now **1.2102 TTT BPB** on the clean 11L full-shard repro. Gap: **0.091 BPB**.
 
-**Gap breakdown**:
-- Insufficient steps/data (~65%): only 80/195 shards, still steep improvement curve at cap
-- Missing architecture features (~20%): XSA, SmearGate, BigramHash, Partial RoPE, LN Scale
-- Missing training techniques (~10%): EMA, GPTQ-lite, better optimizer config
-- TTT suboptimal (~5%): LoRA vs full-model legal TTT
+**What the repro cycle resolved**:
+- Data coverage and runner trust are no longer the main uncertainty: clean 11L reproduces the old H100 regime on the full dataset.
+- `13L + int8+zstd + calibrated quant` is not currently better than 11L.
+- `EMA(0.997)` is not a promising next lever in this codebase.
+
+**Most plausible next H100-only levers**:
+1. **Deep supervision on clean 11L** — still the best surviving H100-only candidate from local work.
+2. **TTT improvement** — the current LoRA TTT path is competitive but still leaves ~0.09 BPB on the table.
+3. **11L architectural refinement in isolation** — e.g. XSA or another low-risk 11L-only idea, but not feature-stacked.
 
 **Our original contributions** (differentiators):
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
@@ -137,7 +158,7 @@ Three comparative runs on 8xH100 (80/195 shards, 524K batch, 600s wallclock):
 
 **Killed definitively (both Mac + H100)**:
 - SWA (any form) — Mac: no oscillation at 700 steps. H100: 23 snapshots still hurts.
-- EMA on Mac (any decay) — Mac: decay=0.997 gives 48% window at 689 steps, +0.22 BPB. Weight averaging is dead on Mac.
+- EMA(0.997) on current codebase — Mac: +0.22 BPB. H100 isolated repro: raw stays normal but final EMA-loaded evaluation collapses to 1.3724 / 1.3035 TTT.
 - Int6 without STE/GPTQ — Mac: +0.063 gap. H100: +0.092 gap. Even worse with more params.
 - Label smoothing with small vocab — catastrophic
 - Depth recurrence during warmdown — warmdown is sacred

@@ -60,3 +60,6 @@ e8addc5	1.6446	14102619	discard	exp_070: MODEL_DIM=544 (27.2M params) — +0.023
 3c858b5-dirty	2.076600	13371781	discard	exp_077: Lighter deep supervision (layers 3,7 alpha=0.05) — overhead fixed but quality still slightly worse than baseline
 3c858b5-dirty	1.638700	13401013	discard	exp_078: Refined curriculum 256:0.10,512:0.30,1024:1.0 — 703 steps, val_bpb 1.6387. Worse than both baseline and original curriculum
 3c858b5-dirty	1.628300	12976715	discard	exp_079: Decoder-only pre-warmdown QAT — smoke win did not survive medium; 654 steps, val_bpb 1.6283
+3e34098	1.231636	14479660	keep	H100 clean_11l_no_ema: full 195 shards, zstd-22, 8007 steps at 74.95ms/step, post-quant 1.2316, TTT 1.2102. Trusted baseline repro
+3e34098	1.244190	14744791	discard	H100 capacity_13l_no_ema: 13L int8+zstd + calibrated quant, 6984 steps at 85.92ms/step, post-quant 1.2442, TTT 1.2280. Worse than clean 11L
+3e34098	1.372394	14536086	discard	H100 ema_11l: isolated EMA decay=0.997, raw 1.2291 but post-EMA final 1.3724 and TTT 1.3035. EMA killed in this codebase

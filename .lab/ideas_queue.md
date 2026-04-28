@@ -10,25 +10,34 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 
 ---
 
-## START HERE: Minimal H100 Session
+## START HERE: Next H100 Session
 
-**Goal**: Spend the next RunPod budget only on the highest-information runs. The local-first follow-up cycle found no shared-stack winner worth promoting.
+**Goal**: Build on the cleaned full-shard 11L repro. The diagnostic cycle resolved the runner/data questions and killed both the current 13L recipe and EMA in this codebase.
 **Current best**: val_bpb=1.6215 (exp_063, commit e8addc5)
-**H100 best**: TTT BPB 1.2087 | Leaderboard: 1.1194 | Gap: 0.089 BPB
+**Best trustworthy H100 result**: TTT BPB 1.2102 (`clean_11l_no_ema`) | Leaderboard: 1.1194 | Gap: 0.091
 
 Run these in order:
 
-### H100-Next-1: Clean 11L repro, no EMA [KNOWN, H100-ONLY]
-**What**: Reproduce the best known PyTorch baseline in `train_gpt.py` with full 195 shards, `int8 + zstd`, and **EMA off**.
-**Why**: Re-establish trustworthy measurement in the real scoring path before testing any new feature.
+### H100-Next-1: 11L + Deep Supervision, no EMA [OUR TWIST, H100-ONLY]
+**What**: Re-run the clean 11L H100 baseline with `DEEP_SUPERVISION=1`, `DEEP_SUPERVISION_ALPHA=0.05`, `DEEP_SUPERVISION_LAYERS=3,7`, and **EMA off**.
+**Why**: This remains the strongest surviving H100-only idea. The original Mac run improved per-step quality but lost on overhead; the lighter Mac variant removed the gain entirely, so the question is now purely H100-side.
 
-### H100-Next-2: 13L int8+zstd capacity test, no EMA [KNOWN, H100-ONLY]
-**What**: Re-run the 13-layer capacity direction with `int8 + zstd` instead of int6, still with **EMA off**.
-**Why**: H100 logs already showed 13L has better pre-quant quality. The missing question is whether int8 preserves enough of that gain under the size cap.
+### H100-Next-2: TTT improvement on clean 11L [KNOWN, H100-ONLY]
+**What**: Keep training fixed at the clean 11L config and improve the evaluation path only.
+**Why**: The current clean baseline already gets to `1.2102` TTT. Most of the remaining gap is now likely in test-time adaptation rather than base training throughput or EMA.
 
-### H100-Next-3: EMA isolated on the clean 11L stack [KNOWN, H100-ONLY]
-**What**: Add `EMA_DECAY=0.997` to the clean 11L repro only. No other changes.
-**Why**: EMA is a real H100-only hypothesis, but the current code path can make it look much worse if stacked with other uncertainty. Test it in isolation.
+### H100-Next-3: 11L architectural refinement in isolation [KNOWN, LOW PRIORITY]
+**What**: If needed, test one 11L-only architectural change such as XSA on the last decoder layers, with everything else held fixed and **EMA off**.
+**Why**: The 13L path is currently dead, so any additional model-side gain should come from a low-risk 11L refinement rather than another capacity jump.
+
+### ~~H100-Next-1: Clean 11L repro, no EMA~~ COMPLETED -- KEEP
+**Result**: `195/195` shards, `8007` steps, `74.95ms/step`, raw `1.2282`, post-quant `1.2316`, TTT `1.2102`, artifact `14.48MB`. This is now the trusted H100 baseline.
+
+### ~~H100-Next-2: 13L int8+zstd capacity test, no EMA~~ COMPLETED -- DISCARD
+**Result**: `6984` steps, raw `1.2387`, post-quant `1.2442`, TTT `1.2280`, artifact `14.74MB`. Worse than the clean 11L baseline on all meaningful metrics. Kill the current 13L recipe.
+
+### ~~H100-Next-3: EMA isolated on the clean 11L stack~~ COMPLETED -- DISCARD
+**Result**: Raw stays normal (`1.2291`) but the final EMA-loaded eval collapses to post-quant `1.3724` and TTT `1.3035`. EMA(0.997) is dead in this codebase.
 
 ### ~~Experiment 062: Progressive Layer Growing 7L→10L~~ COMPLETED -- DISCARD
 **Result**: Tested via exp_076/076b with a forced early trigger. Even after actual growth, the run lands at **2.1457** BPB at step 200 vs baseline **2.0717**. Faster early steps do not repay the shallow-model quality debt. Kill on Mac and do not promote.
@@ -88,6 +97,8 @@ No clear winners on Mac. Deep supervision and curriculum are both H100 candidate
 
 - Zstd compression on Mac — validated on H100, saves 1.6MB. Not urgent locally.
 - Decoder-only pre-warmdown QAT [ORIGINAL, LOW PRIORITY] — smoke had a tiny win, but medium regressed to **1.6283** at 654 steps. Not worth H100 budget unless future evidence changes.
+- 13L alternatives [LOW PRIORITY] — only reconsider depth if a genuinely different recipe appears; the current int8+zstd+calibrated path is killed.
+- EMA variants [LOW PRIORITY] — only revisit if there is a materially different averaging scheme. Do not retry `EMA_DECAY=0.997`.
 
 ---
 
