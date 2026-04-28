@@ -40,6 +40,8 @@ from train_gpt_common import (
     get_compression_name,
     describe_feature_flags,
     final_eval_weight_source,
+    sim_quant_roundtrip_torch as sim_quant_roundtrip,
+    quantize_float_tensor_calibrated_torch,
 )
 # Backwards-compat alias (we kept the underscore-prefixed name for callers
 # inside this module; common drops the underscore).
@@ -379,41 +381,10 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
     return q, scale
 
+# Calibrated per-row int8 quant lives in train_gpt_common; bind a thin wrapper
+# that injects the per-tensor fallback (the upstream quantize_float_tensor below).
 def quantize_float_tensor_calibrated(tensor: Tensor) -> tuple:
-    """Per-row int8 quantization with MSE-optimal clip percentile selection (vectorized)."""
-    if tensor.ndim != 2:
-        return quantize_float_tensor(tensor)
-    f32 = tensor.detach().float().cpu()
-    candidates = [0.999, 0.9995, 0.9999, 0.99999, 1.0]
-    best_q = torch.zeros_like(f32, dtype=torch.int8)
-    best_scale = torch.zeros(f32.size(0), dtype=torch.float32)
-    best_mse = torch.full((f32.size(0),), float('inf'))
-    abs_f32 = f32.abs()
-    for clip_q in candidates:
-        clip_abs = abs_f32.amax(dim=1) if clip_q >= 1.0 else torch.quantile(abs_f32, clip_q, dim=1)
-        scale = (clip_abs / 127.0).clamp(min=1.0 / 127.0)
-        clipped = torch.clamp(f32, -clip_abs[:, None], clip_abs[:, None])
-        q = (clipped / scale[:, None]).round().clamp(-127, 127).to(torch.int8)
-        mse = ((f32 - q.float() * scale[:, None]) ** 2).mean(dim=1)
-        improved = mse < best_mse
-        best_mse[improved] = mse[improved]
-        best_q[improved] = q[improved]
-        best_scale[improved] = scale[improved]
-    return best_q.numpy(), best_scale.to(torch.float16).numpy()
-
-def sim_quant_roundtrip(w: Tensor) -> Tensor:
-    """Simulate int8 quantize→dequantize in PyTorch ops (stays on GPU)."""
-    f = w.float()
-    qmax = 127.0
-    if f.ndim == 2:
-        row_max = f.abs().amax(dim=1, keepdim=True).clamp(min=1.0 / qmax)
-        scale = row_max / qmax
-        q = (f / scale).round().clamp(-qmax, qmax)
-        return (q * scale).to(w.dtype)
-    amax = f.abs().amax().clamp(min=1.0 / qmax)
-    scale = amax / qmax
-    q = (f / scale).round().clamp(-qmax, qmax)
-    return (q * scale).to(w.dtype)
+    return quantize_float_tensor_calibrated_torch(tensor, quantize_float_tensor)
 
 def quantize_state_dict_int8(state_dict: dict[str, Tensor], calibrated: bool = False):
     quantized: dict[str, Tensor] = {}

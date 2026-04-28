@@ -34,6 +34,7 @@ from train_gpt_common import (
     INT8_KEEP_FLOAT_MAX_NUMEL,
     INT8_CLIP_PERCENTILE,
     INT8_CLIP_Q,
+    sim_quant_roundtrip_mlx,
 )
 
 # ==============================================================================
@@ -770,20 +771,10 @@ INT8_PER_ROW_SCALE_DTYPE = np.float16
 # INT8_KEEP_FLOAT_MAX_NUMEL, INT8_CLIP_PERCENTILE, INT8_CLIP_Q come from train_gpt_common.
 
 
+# sim_quant_roundtrip lives in train_gpt_common; bind a thin wrapper that
+# injects QUANT_MAX_VAL (which depends on QUANT_BITS, defined above).
 def sim_quant_roundtrip(w: mx.array) -> mx.array:
-    """Simulate int8 quantize→dequantize roundtrip in MLX ops (stays on GPU).
-    Per-row for 2D, per-tensor for 1D. Mirrors the actual int8 quantization path."""
-    f = w.astype(mx.float32)
-    qmax = float(QUANT_MAX_VAL)
-    if f.ndim == 2:
-        row_max = mx.maximum(mx.max(mx.abs(f), axis=1, keepdims=True), 1.0 / qmax)
-        scale = row_max / qmax
-        q = mx.clip(mx.round(f / scale), -qmax, qmax)
-        return (q * scale).astype(w.dtype)
-    amax = mx.maximum(mx.max(mx.abs(f)), mx.array(1.0 / qmax))
-    scale = amax / qmax
-    q = mx.clip(mx.round(f / scale), -qmax, qmax)
-    return (q * scale).astype(w.dtype)
+    return sim_quant_roundtrip_mlx(w, qmax_val=QUANT_MAX_VAL)
 
 
 def _np_float32(arr: mx.array) -> np.ndarray:

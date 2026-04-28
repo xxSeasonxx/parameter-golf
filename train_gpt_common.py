@@ -1,14 +1,37 @@
 """Common utilities shared by train_gpt.py (PyTorch) and train_gpt_mlx.py (MLX).
 
-This module contains framework-agnostic code: env-var-driven hyperparameter base class,
-Newton-Schulz coefficient tables, control-tensor name patterns, and int8 quantization
-constants. It must NOT import torch or mlx.core — both files import from here.
+This module contains:
+- Framework-agnostic code (Hyperparameters base, NS coefficient tables, name
+  patterns, int8 constants, pure-Python feature-flag helpers).
+- Framework-typed helpers gated by best-effort imports of torch and mlx. If
+  torch is available, torch-flavored helpers (suffix _torch) are defined; same
+  for mlx. The two train scripts each import only the flavor they need.
+
+Top-level imports of torch/mlx are guarded so that environments missing one
+of them still load this module cleanly.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
+
+# ----------------------------------------------------------------------------
+# Best-effort framework imports.
+# ----------------------------------------------------------------------------
+try:
+    import torch as _torch  # noqa: N816 (private alias for guarded usage)
+    _HAS_TORCH = True
+except ImportError:  # pragma: no cover — environment-dependent
+    _torch = None
+    _HAS_TORCH = False
+
+try:
+    import mlx.core as _mx  # noqa: N816
+    _HAS_MLX = True
+except ImportError:  # pragma: no cover
+    _mx = None
+    _HAS_MLX = False
 
 
 # ============================================================================
@@ -207,3 +230,81 @@ def describe_feature_flags(args, effective_num_layers: int, zstd_available: bool
 def final_eval_weight_source(ema_enabled: bool) -> str:
     """Return the label of the weight source used for the final-eval pass."""
     return "ema" if ema_enabled else "live"
+
+
+# ============================================================================
+# QAT-REGULARIZER + CALIBRATED-INT8-QUANT HELPERS (framework-typed)
+# ============================================================================
+# sim_quant_roundtrip is the per-step "fake quant noise" used by the
+# pre-warmdown QAT regularizer (exp_051). quantize_float_tensor_calibrated is
+# the MSE-optimal clip-percentile sweep used during the final int8 serializer
+# (exp_055 era). Both are OUR additions over upstream.
+
+if _HAS_TORCH:
+    def sim_quant_roundtrip_torch(w):
+        """Simulate int8 quantize -> dequantize roundtrip in PyTorch ops.
+
+        Per-row for 2D, per-tensor for 1D. Mirrors the actual int8 quantization
+        path. Used by the pre-warmdown QAT regularizer to inject quant noise
+        every QAT_EVERY steps during training.
+        """
+        f = w.float()
+        qmax = 127.0
+        if f.ndim == 2:
+            row_max = f.abs().amax(dim=1, keepdim=True).clamp(min=1.0 / qmax)
+            scale = row_max / qmax
+            q = (f / scale).round().clamp(-qmax, qmax)
+            return (q * scale).to(w.dtype)
+        amax = f.abs().amax().clamp(min=1.0 / qmax)
+        scale = amax / qmax
+        q = (f / scale).round().clamp(-qmax, qmax)
+        return (q * scale).to(w.dtype)
+
+    def quantize_float_tensor_calibrated_torch(tensor, fallback_per_tensor):
+        """Per-row int8 quantization with MSE-optimal clip percentile selection.
+
+        Sweeps a small set of clip quantiles, picks the one with smallest
+        squared-error per row. Returns numpy arrays (int8 codes + fp16 scales)
+        ready to embed in the serialized state dict. fallback_per_tensor is the
+        non-2D fallback function (typically the upstream quantize_float_tensor
+        living in train_gpt.py).
+        """
+        if tensor.ndim != 2:
+            return fallback_per_tensor(tensor)
+        f32 = tensor.detach().float().cpu()
+        candidates = [0.999, 0.9995, 0.9999, 0.99999, 1.0]
+        best_q = _torch.zeros_like(f32, dtype=_torch.int8)
+        best_scale = _torch.zeros(f32.size(0), dtype=_torch.float32)
+        best_mse = _torch.full((f32.size(0),), float('inf'))
+        abs_f32 = f32.abs()
+        for clip_q in candidates:
+            clip_abs = abs_f32.amax(dim=1) if clip_q >= 1.0 else _torch.quantile(abs_f32, clip_q, dim=1)
+            scale = (clip_abs / 127.0).clamp(min=1.0 / 127.0)
+            clipped = _torch.clamp(f32, -clip_abs[:, None], clip_abs[:, None])
+            q = (clipped / scale[:, None]).round().clamp(-127, 127).to(_torch.int8)
+            mse = ((f32 - q.float() * scale[:, None]) ** 2).mean(dim=1)
+            improved = mse < best_mse
+            best_mse[improved] = mse[improved]
+            best_q[improved] = q[improved]
+            best_scale[improved] = scale[improved]
+        return best_q.numpy(), best_scale.to(_torch.float16).numpy()
+
+
+if _HAS_MLX:
+    def sim_quant_roundtrip_mlx(w, qmax_val: float = 127.0):
+        """MLX equivalent of sim_quant_roundtrip_torch.
+
+        qmax_val is parameterized because train_gpt_mlx.py defines QUANT_MAX_VAL
+        as a module-level constant; passing it through keeps the helper pure.
+        """
+        f = w.astype(_mx.float32)
+        qmax = float(qmax_val)
+        if f.ndim == 2:
+            row_max = _mx.maximum(_mx.max(_mx.abs(f), axis=1, keepdims=True), 1.0 / qmax)
+            scale = row_max / qmax
+            q = _mx.clip(_mx.round(f / scale), -qmax, qmax)
+            return (q * scale).astype(w.dtype)
+        amax = _mx.maximum(_mx.max(_mx.abs(f)), _mx.array(1.0 / qmax))
+        scale = amax / qmax
+        q = _mx.clip(_mx.round(f / scale), -qmax, qmax)
+        return (q * scale).astype(w.dtype)
