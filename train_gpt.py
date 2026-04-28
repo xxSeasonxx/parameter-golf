@@ -782,8 +782,12 @@ class Block(nn.Module):
         qk_gain_init: float,
     ):
         super().__init__()
-        self.attn_norm = RMSNorm()
-        self.mlp_norm = RMSNorm()
+        if Hyperparameters.use_dyt_norm:
+            self.attn_norm = DyT(dim)
+            self.mlp_norm = DyT(dim)
+        else:
+            self.attn_norm = RMSNorm()
+            self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -907,7 +911,7 @@ class GPT(nn.Module):
                 for i in range(num_layers)
             ]
         )
-        self.final_norm = RMSNorm()
+        self.final_norm = DyT(model_dim) if Hyperparameters.use_dyt_norm else RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
             self.lm_head._zero_init = True
