@@ -35,6 +35,7 @@ from train_gpt_common import (
     INT8_CLIP_PERCENTILE,
     INT8_CLIP_Q,
     sim_quant_roundtrip_mlx,
+    DyTMLX as DyT,
 )
 
 # ==============================================================================
@@ -293,30 +294,6 @@ class RMSNormNoWeight(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         return rms_norm(x)
 
-
-class DyT(nn.Module):
-    """Dynamic Tanh: gamma * tanh(alpha * x) + beta.
-
-    Drop-in replacement for RMSNorm. alpha is a learnable scalar, gamma and
-    beta are learnable per-channel vectors. Reference: Zhu et al., CVPR 2025
-    (arxiv 2503.10622). Mirror of the PyTorch DyT in train_gpt.py.
-    """
-
-    def __init__(self, dim: int, alpha_init: float = 0.5):
-        super().__init__()
-        # MLX treats any mx.array attribute as a parameter (no nn.Parameter wrapper).
-        # Keep these in fp32 — alpha/gamma/beta are tiny scalars and per-channel
-        # vectors, and the MLX optimizer + quantizer paths preserve fp32 control
-        # tensors via the CONTROL_TENSOR_NAME_PATTERNS list.
-        self.alpha = mx.array(alpha_init, dtype=mx.float32)
-        self.gamma = mx.ones((dim,), dtype=mx.float32)
-        self.beta = mx.zeros((dim,), dtype=mx.float32)
-
-    def __call__(self, x: mx.array) -> mx.array:
-        return (
-            self.gamma.astype(x.dtype) * mx.tanh(self.alpha.astype(x.dtype) * x)
-            + self.beta.astype(x.dtype)
-        )
 
 
 class CausalSelfAttention(nn.Module):

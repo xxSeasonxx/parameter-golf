@@ -42,6 +42,7 @@ from train_gpt_common import (
     final_eval_weight_source,
     sim_quant_roundtrip_torch as sim_quant_roundtrip,
     quantize_float_tensor_calibrated_torch,
+    DyTTorch as DyT,
 )
 # Backwards-compat alias (we kept the underscore-prefixed name for callers
 # inside this module; common drops the underscore).
@@ -546,23 +547,6 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
-
-
-class DyT(nn.Module):
-    """Dynamic Tanh: gamma * tanh(alpha * x) + beta. Drop-in replacement for RMSNorm.
-
-    Reference: Zhu et al., CVPR 2025 (arxiv 2503.10622). alpha is a scalar learnable
-    parameter; gamma and beta are per-channel.
-    """
-
-    def __init__(self, dim: int, alpha_init: float = 0.5):
-        super().__init__()
-        self.alpha = nn.Parameter(torch.tensor(alpha_init, dtype=torch.float32))
-        self.gamma = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.beta = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.gamma.to(dtype=x.dtype) * torch.tanh(self.alpha.to(dtype=x.dtype) * x) + self.beta.to(dtype=x.dtype)
 
 
 class CastedLinear(nn.Linear):

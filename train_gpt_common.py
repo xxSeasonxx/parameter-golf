@@ -308,3 +308,61 @@ if _HAS_MLX:
         scale = amax / qmax
         q = _mx.clip(_mx.round(f / scale), -qmax, qmax)
         return (q * scale).astype(w.dtype)
+
+
+# ============================================================================
+# DyT (Dynamic Tanh) — drop-in replacement for RMSNorm
+# ============================================================================
+# Reference: Zhu et al., CVPR 2025 (arxiv 2503.10622).
+# DyT(x) = gamma * tanh(alpha * x) + beta
+# alpha is a scalar learnable parameter (init 0.5 per paper);
+# gamma/beta are per-channel learnable vectors.
+#
+# We define one class per framework so each train script gets a native
+# nn.Module. Importers do `from train_gpt_common import DyTTorch as DyT`.
+
+if _HAS_TORCH:
+    import torch.nn as _torch_nn
+
+    class DyTTorch(_torch_nn.Module):
+        """PyTorch DyT. See module-level docstring for the formula."""
+
+        def __init__(self, dim: int, alpha_init: float = 0.5):
+            super().__init__()
+            self.alpha = _torch_nn.Parameter(_torch.tensor(alpha_init, dtype=_torch.float32))
+            self.gamma = _torch_nn.Parameter(_torch.ones(dim, dtype=_torch.float32))
+            self.beta = _torch_nn.Parameter(_torch.zeros(dim, dtype=_torch.float32))
+
+        def forward(self, x):
+            return (
+                self.gamma.to(dtype=x.dtype)
+                * _torch.tanh(self.alpha.to(dtype=x.dtype) * x)
+                + self.beta.to(dtype=x.dtype)
+            )
+
+
+if _HAS_MLX:
+    import mlx.nn as _mlx_nn
+
+    class DyTMLX(_mlx_nn.Module):
+        """MLX DyT. MLX treats any mx.array attribute as a parameter.
+
+        Keep alpha/gamma/beta in fp32: they are tiny scalars/per-channel vectors,
+        and the MLX optimizer + quantizer paths preserve fp32 control tensors via
+        the CONTROL_TENSOR_NAME_PATTERNS list. Note: train_gpt_mlx.py also has
+        a SplitOptimizers leak detector that asserts these scalars are routed
+        to the Adam group — if you rename or relocate DyT, verify the leak
+        detector still binds the params.
+        """
+
+        def __init__(self, dim: int, alpha_init: float = 0.5):
+            super().__init__()
+            self.alpha = _mx.array(alpha_init, dtype=_mx.float32)
+            self.gamma = _mx.ones((dim,), dtype=_mx.float32)
+            self.beta = _mx.zeros((dim,), dtype=_mx.float32)
+
+        def __call__(self, x):
+            return (
+                self.gamma.astype(x.dtype) * _mx.tanh(self.alpha.astype(x.dtype) * x)
+                + self.beta.astype(x.dtype)
+            )
