@@ -11,7 +11,6 @@ import random
 import subprocess
 import sys
 import time
-import uuid
 import zlib
 from pathlib import Path
 
@@ -28,64 +27,29 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-class Hyperparameters:
-    data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
-    train_files = os.path.join(data_path, "fineweb_train_*.bin")
-    val_files = os.path.join(data_path, "fineweb_val_*.bin")
-    tokenizer_path = os.environ.get("TOKENIZER_PATH", "./data/tokenizers/fineweb_1024_bpe.model")
-    run_id = os.environ.get("RUN_ID", str(uuid.uuid4()))
-    seed = int(os.environ.get("SEED", 1337))
-    val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
-    val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
-    train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
+from train_gpt_common import (
+    Hyperparameters as _CommonHyperparameters,
+    POLAR_EXPRESS_COEFFS_5 as _POLAR_EXPRESS_COEFFS_5,
+    BASELINE_NS_COEFFS as _BASELINE_NS_COEFFS,
+    CONTROL_TENSOR_NAME_PATTERNS,
+    INT8_KEEP_FLOAT_FP32_NAME_PATTERNS,
+    INT8_KEEP_FLOAT_MAX_NUMEL,
+    INT8_CLIP_PERCENTILE,
+    INT8_CLIP_Q,
+)
 
-    iterations = int(os.environ.get("ITERATIONS", 20000))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
-    warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
-    train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
-    train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
-    max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
-    qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
 
-    vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
-    num_layers = int(os.environ.get("NUM_LAYERS", 9))
-    num_kv_heads = int(os.environ.get("NUM_KV_HEADS", 4))
-    model_dim = int(os.environ.get("MODEL_DIM", 512))
-    num_heads = int(os.environ.get("NUM_HEADS", 8))
-    mlp_mult = int(os.environ.get("MLP_MULT", 2))
-    tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
-    rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
-    logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
+class Hyperparameters(_CommonHyperparameters):
+    # PyTorch-only fields (TTT-LoRA, EMA, layer growth, zstd, calibrated quant,
+    # plus train_files/val_files convenience strings and the non-tied embed/head LRs).
+    train_files = os.path.join(_CommonHyperparameters.data_path, "fineweb_train_*.bin")
+    val_files = os.path.join(_CommonHyperparameters.data_path, "fineweb_val_*.bin")
 
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
-    tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.05))
-    tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
-    matrix_lr = float(os.environ.get("MATRIX_LR", 0.04))
-    scalar_lr = float(os.environ.get("SCALAR_LR", 0.04))
-    muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
-    muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
-    muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
-    muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
-    beta1 = float(os.environ.get("BETA1", 0.9))
-    beta2 = float(os.environ.get("BETA2", 0.95))
-    adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
-    grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
-    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
-    layer_lr_scale = float(os.environ.get("LAYER_LR_SCALE", 0.0))
-    mlp_mult_asymmetric = os.environ.get("MLP_MULT_ASYMMETRIC", "")
-    freq_skip_gating = bool(int(os.environ.get("FREQ_SKIP_GATING", "0")))
-    freq_skip_window = int(os.environ.get("FREQ_SKIP_WINDOW", 32))
-    qat_prewarmdown = bool(int(os.environ.get("QAT_PREWARMDOWN", "0")))
-    qat_strength = float(os.environ.get("QAT_STRENGTH", 0.1))
-    qat_stop_lr_mul = float(os.environ.get("QAT_STOP_LR_MUL", 0.8))
-    qat_every = int(os.environ.get("QAT_EVERY", 10))
     ema_decay = float(os.environ.get("EMA_DECAY", 0.0))
     int8_keep_float_fp16_name_patterns = os.environ.get("INT8_KEEP_FLOAT_FP16_NAME_PATTERNS", "")
-    deep_supervision = bool(int(os.environ.get("DEEP_SUPERVISION", "0")))
-    deep_supervision_alpha = float(os.environ.get("DEEP_SUPERVISION_ALPHA", 0.1))
-    deep_supervision_layers = os.environ.get("DEEP_SUPERVISION_LAYERS", "")
     calibrated_quant = bool(int(os.environ.get("CALIBRATED_QUANT", "0")))
     grow_layers_from = int(os.environ.get("GROW_LAYERS_FROM", 0))
     grow_at_wallclock_frac = float(os.environ.get("GROW_AT_WALLCLOCK_FRAC", 0.35))
@@ -98,26 +62,7 @@ class Hyperparameters:
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 1024))
     ttt_batch_size = int(os.environ.get("TTT_BATCH_SIZE", 64))
 
-    # Sliding window evaluation: each scored token gets (seq_len - eval_stride) of context.
-    # 0 disables sliding window. 64 is the competition-best stride.
-    eval_stride = int(os.environ.get("EVAL_STRIDE", 0))
-
-    # L1' cheap winners (Polar Express NS, DyT replacing RMSNorm).
-    use_polar_express = bool(int(os.environ.get("USE_POLAR_EXPRESS", "0")))
-    use_dyt_norm = bool(int(os.environ.get("USE_DYT_NORM", "0")))
-
 # Muon optimizer (from modded-nanogpt, see https://kellerjordan.github.io/posts/muon/)
-
-# Polar Express coefficients (Chebyshev-style minimax-optimal, ICML 2025).
-# Reference: arxiv 2505.16932; impl: github.com/Dao-AILab/gram-newton-schulz
-_POLAR_EXPRESS_COEFFS_5 = (
-    (8.28721202544396, -23.595886519098837, 17.300387312530933),
-    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
-    (3.948690853482295, -2.908902115962949, 0.5518191394370137),
-    (3.318419657370526, -2.488488024314215, 0.5099255672945051),
-    (2.300652019954817, -1.665307437232293, 0.3737887369687766),
-)
-_BASELINE_NS_COEFFS = (3.4445, -4.7750, 2.0315)
 
 
 def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7,
@@ -392,28 +337,10 @@ def eval_val_sliding(
     return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
 
 # Post-training int8 quantization + compression.
-
-CONTROL_TENSOR_NAME_PATTERNS = tuple(
-    pattern
-    for pattern in os.environ.get(
-        "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,skip_lo_weight,skip_hi_weight",
-    ).split(",")
-    if pattern
-)
-INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = tuple(
-    pattern
-    for pattern in os.environ.get(
-        "INT8_KEEP_FLOAT_FP32_NAME_PATTERNS",
-        ",".join(CONTROL_TENSOR_NAME_PATTERNS),
-    ).split(",")
-    if pattern
-)
-INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
+# Pattern tuples + numerical constants come from train_gpt_common; only the
+# framework-specific store dtypes stay here.
 INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
 INT8_PER_ROW_SCALE_DTYPE = torch.float16
-INT8_CLIP_PERCENTILE = 99.99984
-INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
