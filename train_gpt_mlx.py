@@ -155,20 +155,36 @@ def rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
     return (x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)).astype(x.dtype)
 
 
-def zeropower_newtonschulz5(g: mx.array, steps: int, eps: float = 1e-7) -> mx.array:
+def zeropower_newtonschulz5(
+    g: mx.array,
+    steps: int,
+    eps: float = 1e-7,
+    use_polar_express: bool = False,
+) -> mx.array:
     # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
     # Muon uses this to normalize matrix-shaped gradients before applying them.
     # Background on Muon: https://kellerjordan.github.io/posts/muon/
-    a, b, c = 3.4445, -4.7750, 2.0315
+    #
+    # use_polar_express: when True, use Chebyshev-minimax-optimal coefficients per
+    # iteration (Polar Express, ICML 2025; arxiv 2505.16932). Otherwise use the
+    # modded-nanogpt baseline single-tuple coefficients.
     x = g.astype(mx.float32)
     x = x / (mx.sqrt(mx.sum(x * x)) + eps)
     transposed = x.shape[0] > x.shape[1]
     if transposed:
         x = x.T
-    for _ in range(steps):
-        a_mat = x @ x.T
-        b_mat = b * a_mat + c * (a_mat @ a_mat)
-        x = a * x + b_mat @ x
+    if use_polar_express:
+        for i in range(steps):
+            a, b, c = POLAR_EXPRESS_COEFFS_5[min(i, len(POLAR_EXPRESS_COEFFS_5) - 1)]
+            a_mat = x @ x.T
+            b_mat = b * a_mat + c * (a_mat @ a_mat)
+            x = a * x + b_mat @ x
+    else:
+        a, b, c = BASELINE_NS_COEFFS
+        for _ in range(steps):
+            a_mat = x @ x.T
+            b_mat = b * a_mat + c * (a_mat @ a_mat)
+            x = a * x + b_mat @ x
     if transposed:
         x = x.T
     return x.astype(g.dtype)
@@ -593,7 +609,11 @@ class Muon:
             buf = momentum * self.buffers[k] + g
             self.buffers[k] = buf
             g_eff = g + momentum * buf
-            g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
+            g_ortho = zeropower_newtonschulz5(
+                g_eff,
+                self.args.muon_backend_steps,
+                use_polar_express=self.args.use_polar_express,
+            )
             scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
             update = (g_ortho * scale).astype(p.dtype)
             if wd > 0:
