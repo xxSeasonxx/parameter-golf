@@ -102,6 +102,10 @@ class Hyperparameters:
     # 0 disables sliding window. 64 is the competition-best stride.
     eval_stride = int(os.environ.get("EVAL_STRIDE", 0))
 
+    # L1' cheap winners (Polar Express NS, DyT replacing RMSNorm).
+    use_polar_express = bool(int(os.environ.get("USE_POLAR_EXPRESS", "0")))
+    use_dyt_norm = bool(int(os.environ.get("USE_DYT_NORM", "0")))
+
 # Muon optimizer (from modded-nanogpt, see https://kellerjordan.github.io/posts/muon/)
 
 def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
