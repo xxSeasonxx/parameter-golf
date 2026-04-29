@@ -1480,19 +1480,10 @@ def main() -> None:
     quant_state = torch.load(io.BytesIO(quant_raw_disk), map_location="cpu")
     base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
     eval_fn = eval_val_sliding if args.eval_stride > 0 else eval_val
-    # Compile warmup: prime the eval-shape graph cache before the timing-gated eval.
-    # The training loop uses shape (B, train_seq_len); sliding eval uses (1, seq_len+1).
-    # First call to eval_fn triggers a recompile, which we don't want inside the eval timer.
-    if args.eval_stride > 0 and rank == 0:
-        warmup_tokens = val_tokens[: args.train_seq_len * 4 + 1]
-        with torch.inference_mode():
-            for _ in range(2):
-                _ = eval_fn(
-                    args, model, rank=0, world_size=1, device=device, grad_accum_steps=1,
-                    val_tokens=warmup_tokens, base_bytes_lut=base_bytes_lut,
-                    has_leading_space_lut=has_leading_space_lut,
-                    is_boundary_token_lut=is_boundary_token_lut,
-                )
+    # NOTE: a previous compile-warmup that ran only on rank 0 caused a hard
+    # DDP deadlock — eval_fn calls dist.all_reduce internally, and rank 0 alone
+    # cannot complete that collective while ranks 1-7 sit at a barrier. Removed.
+    # Compile cost (~5-10s) is included in the first eval call's eval_time log.
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
     torch.cuda.synchronize()
