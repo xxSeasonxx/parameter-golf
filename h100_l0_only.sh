@@ -34,7 +34,7 @@ export USE_DYT_NORM=0
 # TTT defaults (rank 8, chunk 256)
 
 export ITERATIONS=20000
-export VAL_LOSS_EVERY=500
+export VAL_LOSS_EVERY=0
 export MAX_WALLCLOCK_SECONDS=600
 
 mkdir -p runs

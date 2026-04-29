@@ -37,7 +37,7 @@ export TTT_LORA_RANK=16
 export TTT_CHUNK_SIZE=128
 
 export ITERATIONS=20000
-export VAL_LOSS_EVERY=500
+export VAL_LOSS_EVERY=0
 export MAX_WALLCLOCK_SECONDS=600
 
 mkdir -p runs
