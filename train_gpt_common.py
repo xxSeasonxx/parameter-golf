@@ -3,12 +3,12 @@
 This module contains:
 - Framework-agnostic code (Hyperparameters base, NS coefficient tables, name
   patterns, int8 constants, pure-Python feature-flag helpers).
-- Framework-typed helpers gated by best-effort imports of torch and mlx. If
-  torch is available, torch-flavored helpers (suffix _torch) are defined; same
-  for mlx. The two train scripts each import only the flavor they need.
+- Framework-typed helpers gated by best-effort imports of torch or lazy imports
+  of mlx. If torch is available, torch-flavored helpers (suffix _torch) are
+  defined. MLX helpers import mlx only when called/instantiated.
 
-Top-level imports of torch/mlx are guarded so that environments missing one
-of them still load this module cleanly.
+Top-level imports of optional framework modules are guarded/lazy so that
+environments missing one of them still load this module cleanly.
 """
 
 from __future__ import annotations
@@ -25,13 +25,6 @@ try:
 except ImportError:  # pragma: no cover — environment-dependent
     _torch = None
     _HAS_TORCH = False
-
-try:
-    import mlx.core as _mx  # noqa: N816
-    _HAS_MLX = True
-except ImportError:  # pragma: no cover
-    _mx = None
-    _HAS_MLX = False
 
 
 # ============================================================================
@@ -315,24 +308,25 @@ if _HAS_TORCH:
         return best_q.numpy(), best_scale.to(_torch.float16).numpy()
 
 
-if _HAS_MLX:
-    def sim_quant_roundtrip_mlx(w, qmax_val: float = 127.0):
-        """MLX equivalent of sim_quant_roundtrip_torch.
+def sim_quant_roundtrip_mlx(w, qmax_val: float = 127.0):
+    """MLX equivalent of sim_quant_roundtrip_torch.
 
-        qmax_val is parameterized because train_gpt_mlx.py defines QUANT_MAX_VAL
-        as a module-level constant; passing it through keeps the helper pure.
-        """
-        f = w.astype(_mx.float32)
-        qmax = float(qmax_val)
-        if f.ndim == 2:
-            row_max = _mx.maximum(_mx.max(_mx.abs(f), axis=1, keepdims=True), 1.0 / qmax)
-            scale = row_max / qmax
-            q = _mx.clip(_mx.round(f / scale), -qmax, qmax)
-            return (q * scale).astype(w.dtype)
-        amax = _mx.maximum(_mx.max(_mx.abs(f)), _mx.array(1.0 / qmax))
-        scale = amax / qmax
-        q = _mx.clip(_mx.round(f / scale), -qmax, qmax)
+    qmax_val is parameterized because train_gpt_mlx.py defines QUANT_MAX_VAL
+    as a module-level constant; passing it through keeps the helper pure.
+    """
+    import mlx.core as mx
+
+    f = w.astype(mx.float32)
+    qmax = float(qmax_val)
+    if f.ndim == 2:
+        row_max = mx.maximum(mx.max(mx.abs(f), axis=1, keepdims=True), 1.0 / qmax)
+        scale = row_max / qmax
+        q = mx.clip(mx.round(f / scale), -qmax, qmax)
         return (q * scale).astype(w.dtype)
+    amax = mx.maximum(mx.max(mx.abs(f)), mx.array(1.0 / qmax))
+    scale = amax / qmax
+    q = mx.clip(mx.round(f / scale), -qmax, qmax)
+    return (q * scale).astype(w.dtype)
 
 
 # ============================================================================
@@ -366,28 +360,38 @@ if _HAS_TORCH:
             )
 
 
-if _HAS_MLX:
-    import mlx.nn as _mlx_nn
+class DyTMLX:
+    """Lazy MLX DyT factory.
 
-    class DyTMLX(_mlx_nn.Module):
-        """MLX DyT. MLX treats any mx.array attribute as a parameter.
+    Importing train_gpt_common must not import mlx. Instantiating this factory
+    returns a native mlx.nn.Module with the same behavior as the eager class.
+    """
 
-        Keep alpha/gamma/beta in fp32: they are tiny scalars/per-channel vectors,
-        and the MLX optimizer + quantizer paths preserve fp32 control tensors via
-        the CONTROL_TENSOR_NAME_PATTERNS list. Note: train_gpt_mlx.py also has
-        a SplitOptimizers leak detector that asserts these scalars are routed
-        to the Adam group — if you rename or relocate DyT, verify the leak
-        detector still binds the params.
-        """
+    def __new__(cls, dim: int, alpha_init: float = 0.5):
+        import mlx.core as mx
+        import mlx.nn as mlx_nn
 
-        def __init__(self, dim: int, alpha_init: float = 0.5):
-            super().__init__()
-            self.alpha = _mx.array(alpha_init, dtype=_mx.float32)
-            self.gamma = _mx.ones((dim,), dtype=_mx.float32)
-            self.beta = _mx.zeros((dim,), dtype=_mx.float32)
+        class _DyTMLX(mlx_nn.Module):
+            """MLX DyT. MLX treats any mx.array attribute as a parameter.
 
-        def __call__(self, x):
-            return (
-                self.gamma.astype(x.dtype) * _mx.tanh(self.alpha.astype(x.dtype) * x)
-                + self.beta.astype(x.dtype)
-            )
+            Keep alpha/gamma/beta in fp32: they are tiny scalars/per-channel vectors,
+            and the MLX optimizer + quantizer paths preserve fp32 control tensors via
+            the CONTROL_TENSOR_NAME_PATTERNS list. Note: train_gpt_mlx.py also has
+            a SplitOptimizers leak detector that asserts these scalars are routed
+            to the Adam group — if you rename or relocate DyT, verify the leak
+            detector still binds the params.
+            """
+
+            def __init__(self, dim: int, alpha_init: float = 0.5):
+                super().__init__()
+                self.alpha = mx.array(alpha_init, dtype=mx.float32)
+                self.gamma = mx.ones((dim,), dtype=mx.float32)
+                self.beta = mx.zeros((dim,), dtype=mx.float32)
+
+            def __call__(self, x):
+                return (
+                    self.gamma.astype(x.dtype) * mx.tanh(self.alpha.astype(x.dtype) * x)
+                    + self.beta.astype(x.dtype)
+                )
+
+        return _DyTMLX(dim, alpha_init)
