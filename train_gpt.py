@@ -284,20 +284,51 @@ def eval_val_sliding(
 ) -> tuple[float, float]:
     """Sliding-window evaluation: each scored token sees (seq_len - stride) of context.
 
-    For each window of `seq_len` tokens, only the last `stride` tokens are scored.
-    With stride=64 and seq_len=1024, each token gets 960 context tokens.
+    Uses model(..., return_per_token=True) to get per-position loss, batches multiple
+    windows together, and sums ONLY the loss positions that should be scored:
+    - First window: all (seq_len - 1) predictions (no context tax on the cold start).
+    - Subsequent windows: only the last `stride` predictions (each saw seq_len - stride
+      of context).
 
-    Cost: ~seq_len/stride more forward passes than chunked. With stride == seq_len,
-    degenerates to chunked eval.
+    Two correctness invariants this fix protects:
+    1. Per-window scoring is exact: we sum the per-token cross-entropy at scored
+       positions, not the mean-over-all-positions weighted by scored count (the prior
+       bug, which made sliding-window collapse to chunked-eval-with-different-weighting).
+    2. Batching keeps the H100 busy: B=val_batch_size//seq_len windows per forward,
+       which on a 27M model at seq=1024 is roughly the training-step compute cost,
+       saturating the GPU vs the prior 1-window-per-call (kernel-launch-dominated).
     """
     stride = args.eval_stride if args.eval_stride > 0 else args.train_seq_len
     seq_len = args.train_seq_len
-
     n_tokens = val_tokens.numel()
-    n_windows_total = max(1, (n_tokens - seq_len) // stride + 1)
+
+    # Plan all windows globally (deterministic, every rank agrees).
+    # Convention here matches the MLX path: n_pred = max valid prediction position.
+    n_pred = n_tokens - 1
+    if n_pred < 1:
+        return 0.0, 0.0
+    windows: list[tuple[int, int, int]] = []
+    # First window: starts at 0, scores up to seq_len-1 predictions.
+    first_n = min(seq_len - 1, n_pred)
+    windows.append((0, 0, first_n))
+    pos = seq_len - 1
+    while pos < n_pred:
+        win_end = min(pos + stride, n_pred)
+        win_start = max(win_end - (seq_len - 1), 0)
+        n_scored = min(stride, win_end - win_start)
+        score_start = win_end - n_scored
+        windows.append((win_start, score_start, n_scored))
+        pos = win_end
+    n_windows_total = len(windows)
+
+    # Shard windows across ranks.
     win_per_rank = (n_windows_total + world_size - 1) // world_size
     win_start_idx = rank * win_per_rank
     win_end_idx = min(win_start_idx + win_per_rank, n_windows_total)
+    rank_windows = windows[win_start_idx:win_end_idx]
+
+    # Batch size: how many windows fit in val_batch_size tokens at seq_len.
+    batch_size = max(1, args.val_batch_size // (max(grad_accum_steps, 1) * seq_len))
 
     val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     val_token_count = torch.zeros((), device=device, dtype=torch.float64)
@@ -305,36 +336,58 @@ def eval_val_sliding(
 
     model.eval()
     with torch.inference_mode():
-        for win_idx in range(win_start_idx, win_end_idx):
-            start = win_idx * stride
-            end = min(start + seq_len + 1, n_tokens)
-            local = val_tokens[start:end].to(device=device, dtype=torch.int64, non_blocking=True)
-            if local.numel() < 2:
-                continue
-            x = local[:-1].unsqueeze(0)
-            y = local[1:].unsqueeze(0)
+        for batch_start in range(0, len(rank_windows), batch_size):
+            batch = rank_windows[batch_start:batch_start + batch_size]
+            actual_batch = len(batch)
+
+            # Build (B, seq_len) input/target tensors. Each row is one window.
+            x_batch = torch.zeros((actual_batch, seq_len), dtype=torch.int64, device=device)
+            y_batch = torch.zeros((actual_batch, seq_len), dtype=torch.int64, device=device)
+            for i, (ws, _, _) in enumerate(batch):
+                # Window covers tokens [ws : ws+seq_len], inputs are [ws:ws+seq_len-1] and
+                # targets are [ws+1:ws+seq_len], both length seq_len-1. Pad to seq_len with zeros.
+                win_tok_end = min(ws + seq_len, n_tokens)
+                win_len = win_tok_end - ws
+                if win_len < 2:
+                    continue
+                toks = val_tokens[ws:win_tok_end].to(device=device, dtype=torch.int64, non_blocking=True)
+                # Place into row i; positions [0:win_len-1] hold inputs, [1:win_len] hold targets.
+                # We use the same index range for x and y but offset by 1 in the source slice.
+                x_batch[i, :win_len - 1] = toks[:-1]
+                y_batch[i, :win_len - 1] = toks[1:]
+
             with torch.autocast(
                 device_type="cuda" if device.type == "cuda" else "cpu",
                 dtype=torch.bfloat16, enabled=device.type == "cuda",
             ):
-                batch_loss = model(x, y).detach()
+                # per_token shape: (actual_batch, seq_len)
+                per_token = model(x_batch, y_batch, return_per_token=True).detach()
 
-            n_predicted = int(end - start - 1)
-            if win_idx == 0:
-                scored_tokens = n_predicted
-                tgt_subset = y.reshape(-1)
-                prev_subset = x.reshape(-1)
-            else:
-                scored_tokens = min(stride, n_predicted)
-                tgt_subset = y.reshape(-1)[-scored_tokens:]
-                prev_subset = x.reshape(-1)[-scored_tokens:]
+            # Per-window: extract scored positions, accumulate loss + byte counts.
+            for i, (ws, score_start, n_scored) in enumerate(batch):
+                if n_scored <= 0:
+                    continue
+                # score_start is the position of the first SCORED prediction in val_tokens.
+                # In the row, that maps to local index (score_start - ws) in y_batch[i].
+                local_score_start = score_start - ws
+                # Loss positions: [local_score_start : local_score_start + n_scored)
+                loss_slice = per_token[i, local_score_start:local_score_start + n_scored]
+                val_loss_sum += loss_slice.to(torch.float64).sum()
+                val_token_count += float(n_scored)
 
-            val_loss_sum += batch_loss.to(torch.float64) * float(scored_tokens)
-            val_token_count += float(scored_tokens)
-
-            token_bytes = base_bytes_lut[tgt_subset].to(dtype=torch.int16)
-            token_bytes += (has_leading_space_lut[tgt_subset] & ~is_boundary_token_lut[prev_subset]).to(dtype=torch.int16)
-            val_byte_count += token_bytes.to(torch.float64).sum()
+                # Byte counting: the SCORED targets are val_tokens[score_start+1 : score_start+1+n_scored]
+                # and the prev tokens (for boundary check) are val_tokens[score_start : score_start+n_scored].
+                tgt_ids = val_tokens[score_start + 1: score_start + 1 + n_scored].to(
+                    device=device, dtype=torch.int64, non_blocking=True
+                )
+                prev_ids = val_tokens[score_start: score_start + n_scored].to(
+                    device=device, dtype=torch.int64, non_blocking=True
+                )
+                if tgt_ids.numel() == 0:
+                    continue
+                token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
+                token_bytes += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+                val_byte_count += token_bytes.to(torch.float64).sum()
 
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
@@ -769,7 +822,7 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None) -> Tensor:
+    def forward(self, input_ids: Tensor, target_ids: Tensor, lora=None, return_per_token: bool = False) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
@@ -808,10 +861,13 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
         logits = logits + (lora.lm_head_lora(x) if lora else 0)
         logits = self.logit_softcap * torch.tanh(logits / self.logit_softcap)
-        if lora:
+        if lora or return_per_token:
             bsz, sl, V = logits.shape
-            return F.cross_entropy(
+            per_token = F.cross_entropy(
                 logits.float().reshape(-1, V), target_ids.reshape(-1), reduction="none").reshape(bsz, sl)
+            if return_per_token:
+                return per_token
+            return per_token
         main_loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), target_ids.reshape(-1), reduction="mean")
         if self._deep_supervision and aux_states:
             emb_w = self.tok_emb.weight
@@ -1299,7 +1355,11 @@ def main() -> None:
     while True:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
 
-        should_validate = last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0)
+        # Mid-training eval is gated on val_loss_every alone. A previous version triggered
+        # eval on last_step too, which silently ran a (multi-minute) sliding-window eval AFTER
+        # the wallclock cap fired and INSIDE the training-budget logic — silently breaching the
+        # 10-min training cap. The post-cap final eval happens once OUTSIDE the loop (see line ~1500).
+        should_validate = args.val_loss_every > 0 and step % args.val_loss_every == 0
         if should_validate:
             torch.cuda.synchronize()
             training_time_ms += 1000.0 * (time.perf_counter() - t0)
