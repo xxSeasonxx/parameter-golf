@@ -32,9 +32,10 @@ export EVAL_STRIDE=64
 export USE_POLAR_EXPRESS=1
 export USE_DYT_NORM=1
 
-# Extended TTT (rank 16 for more adaptation capacity, smaller chunks for more passes)
-export TTT_LORA_RANK=16
-export TTT_CHUNK_SIZE=128
+# TTT defaults — extended TTT (rank=16, chunk=128) was originally planned but
+# reverted because it ~2x the TTT eval compute, pushing total eval over the
+# README's 10-min hard cap on evaluation time. Extended TTT can return as a
+# separate sprint after we have empirical TTT-eval-time measurements from L0.
 
 export ITERATIONS=20000
 export VAL_LOSS_EVERY=0
