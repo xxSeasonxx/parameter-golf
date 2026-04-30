@@ -5,6 +5,16 @@
 The previous next experiment, isolated deep supervision on the clean 11L stack,
 has been run and discarded.
 
+The follow-up TTT sweep on commit `d0b36ca` rescued the legal score-first TTT
+path. A fresh clean 11L run produced post-quant exact `1.19775040`, and the best
+eval-only TTT setting was:
+
+```bash
+TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128
+```
+
+with TTT BPB `1.1966`.
+
 Corrected H100 control on commit `87b4a2f`:
 
 | Metric | Value |
@@ -36,44 +46,48 @@ TTT versus the corrected control.
 Do not spend another full H100 training run on deep supervision, QK gain, Polar
 Express, or DyT. Local MLX screens on 2026-04-30 did not produce a survivor.
 
-The next RunPod work should tune/evaluate the TTT path on the existing corrected
-control checkpoint, because current TTT is actively harmful:
-
-- post-quant exact: `1.20303259`
-- current TTT: `1.2162`
-- regression: `+0.0132 BPB`
-
-Use `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz` with `EVAL_ONLY_SKIP_ROUNDTRIP=1`
-to run TTT ablations without retraining. First reproduce the current TTT score,
-then sweep only TTT params:
+First run a tight eval-only sweep around the current TTT winner:
 
 ```bash
-TTT_LORA_RANK=8 TTT_LORA_LR=0.01 TTT_CHUNK_SIZE=256
-TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256
-TTT_LORA_RANK=8 TTT_LORA_LR=0.001 TTT_CHUNK_SIZE=256
-TTT_LORA_RANK=4 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256
-TTT_LORA_RANK=4 TTT_LORA_LR=0.001 TTT_CHUNK_SIZE=256
-TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128
-TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=512
-TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256 TTT_EPOCHS=2
+EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz EVAL_ONLY_SKIP_ROUNDTRIP=1
+TTT_LORA_RANK=8 TTT_LORA_LR=0.002 TTT_CHUNK_SIZE=64
+TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=64
+TTT_LORA_RANK=8 TTT_LORA_LR=0.004 TTT_CHUNK_SIZE=64
+TTT_LORA_RANK=8 TTT_LORA_LR=0.002 TTT_CHUNK_SIZE=128
+TTT_LORA_RANK=8 TTT_LORA_LR=0.004 TTT_CHUNK_SIZE=128
+TTT_LORA_RANK=4 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128
+TTT_LORA_RANK=16 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128
+```
+
+Then start the SP2048 full-run gamble:
+
+```bash
+python3 data/download_hf_docs_and_tokenize.py \
+  --output-root ./data/research_tokenizers \
+  --tokenizer-config ./data/tokenizer_specs_sp2048.json \
+  --tokenizer-train-docs 200000
+
+./research_sp2048_h100.sh
 ```
 
 ## Decision Rule
 
-Promote a TTT config only if it beats the corrected post-quant exact baseline:
+Promote a TTT config if it beats the current best:
 
-- strong promote: TTT BPB `<= 1.2000`
-- weak promote: TTT BPB `< 1.20303259`
-- kill TTT path: no ablation beats `1.20303259`
+- strong promote: TTT BPB `< 1.1950`
+- weak promote: TTT BPB `< 1.1966`
+- otherwise keep `TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128`
 
-If TTT remains worse, report/post only the post-quant exact score and move the
-next research sprint to tokenizer/data work (`SP2048` or `SP4096`) or a larger
-architecture change. Small SP1024 toggles are not closing the leaderboard gap.
+Promote SP2048 only if its best legal final score beats `1.1966` and remains
+under 16MB total submission size. Otherwise, keep the tuned SP1024 TTT result as
+the fallback and do not spend more time on SP1024 micro-toggles.
 
 ## Local Tokenizer Prep
 
 Keep `data/tokenizer_specs.json` as the SP1024 default. Use
-`data/tokenizer_specs_research.json` only for intentional SP2048/SP4096 research.
+`data/tokenizer_specs_sp2048.json` for the one-day full-run target, and
+`data/tokenizer_specs_research.json` only for intentional SP2048/SP4096 smoke
+exports.
 
 First run a smoke export with a small docs/training slice:
 

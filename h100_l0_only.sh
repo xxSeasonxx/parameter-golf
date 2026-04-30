@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-export RUN_ID=h100_l0_only
+export RUN_ID="${RUN_ID:-h100_l0_only}"
 export NUM_LAYERS=11
 export INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb
 export MUON_WEIGHT_DECAY=0.10
@@ -32,6 +32,12 @@ export EXPECTED_TRAIN_SHARDS=195
 
 # Final evaluation.
 export EVAL_STRIDE=64
+export TTT_LORA_RANK="${TTT_LORA_RANK:-8}"
+export TTT_LORA_LR="${TTT_LORA_LR:-0.003}"
+export TTT_CHUNK_SIZE="${TTT_CHUNK_SIZE:-128}"
+export TTT_EVAL_SEQ_LEN="${TTT_EVAL_SEQ_LEN:-1024}"
+export TTT_BATCH_SIZE="${TTT_BATCH_SIZE:-64}"
+export TTT_EPOCHS="${TTT_EPOCHS:-1}"
 
 # Explicitly keep L1' flags off for attribution.
 export USE_POLAR_EXPRESS=0
@@ -42,5 +48,5 @@ export VAL_LOSS_EVERY=0
 export MAX_WALLCLOCK_SECONDS=600
 
 mkdir -p runs
-RUN_LOG="runs/h100_l0_only_$(date +%Y%m%d_%H%M%S).log"
+RUN_LOG="runs/${RUN_ID}_$(date +%Y%m%d_%H%M%S).log"
 torchrun --standalone --nproc_per_node=8 train_gpt.py 2>&1 | tee "$RUN_LOG"

@@ -1,0 +1,10 @@
+{
+  "tokenizers": [
+    {
+      "name": "sp_bpe_2048",
+      "dataset_suffix": "sp2048",
+      "vocab_size": 2048,
+      "model_prefix": "fineweb_2048_bpe"
+    }
+  ]
+}

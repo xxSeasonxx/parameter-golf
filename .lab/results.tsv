@@ -65,3 +65,4 @@ e8addc5	1.6446	14102619	discard	exp_070: MODEL_DIM=544 (27.2M params) — +0.023
 3e34098	1.372394	14536086	discard	H100 ema_11l: isolated EMA decay=0.997, raw 1.2291 but post-EMA final 1.3724 and TTT 1.3035. EMA killed in this codebase
 87b4a2f	1.203033	14184763	keep	H100 corrected h100_l0_only: full 195 shards, 6535 steps, post-quant exact 1.20303259, TTT regressed to 1.2162. Use post-quant score.
 87b4a2f	1.206108	14085158	discard	H100 corrected deep supervision: full 195 shards, 6549 steps, post-quant exact 1.20610810, TTT regressed to 1.2192. Worse than corrected control; kill deep supervision.
+d0b36ca	1.196600	14162383	keep	H100 corrected TTT sweep: full 195 shards, post-quant exact 1.19775040, best legal score-first TTT rank8 lr0.003 chunk128 reached 1.1966. Promote tuned TTT defaults.

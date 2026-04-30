@@ -95,7 +95,7 @@ def test_active_runners_do_not_enable_killed_or_deprecated_paths():
 def test_baseline_runner_is_l0_only_control():
     assignments = _runner_env("h100_l0_only.sh")
     required = {
-        "RUN_ID": "h100_l0_only",
+        "RUN_ID": "${RUN_ID:-h100_l0_only}",
         "NUM_LAYERS": "11",
         "EMA_DECAY": "0",
         "EVAL_STRIDE": "64",
@@ -118,8 +118,8 @@ def test_next_experiment_runner_is_eval_only_ttt_ablation():
         "EVAL_ONLY_CHECKPOINT": "${EVAL_ONLY_CHECKPOINT:-./final_model.int8.ptz}",
         "EVAL_ONLY_SKIP_ROUNDTRIP": "${EVAL_ONLY_SKIP_ROUNDTRIP:-1}",
         "TTT_LORA_RANK": "${TTT_LORA_RANK:-8}",
-        "TTT_LORA_LR": "${TTT_LORA_LR:-0.01}",
-        "TTT_CHUNK_SIZE": "${TTT_CHUNK_SIZE:-256}",
+        "TTT_LORA_LR": "${TTT_LORA_LR:-0.003}",
+        "TTT_CHUNK_SIZE": "${TTT_CHUNK_SIZE:-128}",
         "TTT_EPOCHS": "${TTT_EPOCHS:-1}",
         "EVAL_STRIDE": "64",
         "USE_ZSTD": "1",

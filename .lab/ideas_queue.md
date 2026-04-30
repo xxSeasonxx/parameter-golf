@@ -12,21 +12,25 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 
 ## START HERE: Next H100 Session
 
-**Goal**: Build on the corrected full-shard 11L control. The eval/accounting repair improved post-quant BPB and showed that the current TTT path is harmful.
-**Current best**: val_bpb=1.6215 (exp_063, commit e8addc5)
-**Best trustworthy H100 result**: post-quant exact BPB `1.20303259` (`h100_l0_only_20260430_042516`, commit `87b4a2f`). Current TTT regresses to `1.2162`.
+**Goal**: Build beyond the corrected full-shard 11L control. The eval/accounting repair improved post-quant BPB, and the follow-up TTT sweep rescued the legal score-first TTT path.
+**Current best**: H100 tuned TTT BPB `1.1966` (`d0b36ca`, rank8 lr0.003 chunk128).
+**Best trustworthy H100 training result**: post-quant exact BPB `1.19775040` (`h100_l0_only_20260430_132502`, commit `d0b36ca`). Tuned TTT improves this to `1.1966`.
 
 Run these in order:
 
-### H100-Next-1: TTT eval-only ablation on corrected checkpoint [KNOWN, H100-ONLY]
-**What**: Keep training fixed and run `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz EVAL_ONLY_SKIP_ROUNDTRIP=1` while sweeping only `TTT_LORA_RANK`, `TTT_LORA_LR`, `TTT_CHUNK_SIZE`, and `TTT_EPOCHS`.
-**Why**: The corrected post-quant checkpoint is `1.20303259`, but current TTT worsens it to `1.2162`. Eval-only sweeps are much cheaper than full retraining and directly test whether TTT can still be useful.
+### H100-Next-1: TTT local refinement around rank8/lr0.003/chunk128 [SWEEP, H100-ONLY]
+**What**: Keep training fixed and run `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz EVAL_ONLY_SKIP_ROUNDTRIP=1` around `TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128`, including chunk sizes 64/96/128 and lr 0.002-0.004.
+**Why**: The first sweep found a legal TTT improvement (`1.1966`) but only by ~0.001 BPB. A tight eval-only sweep is cheap and may improve the fallback submission.
 
-### H100-Next-2: Tokenizer/data sprint, SP2048 or SP4096 [KNOWN, H100-ONLY]
-**What**: If TTT cannot beat `1.20303259`, retokenize the same docs with `data/tokenizer_specs_research.json` and a larger SentencePiece vocabulary, then run a clean H100 calibration.
-**Why**: Small SP1024 toggles are not closing the gap. Public leaderboard direction and first principles both point to tokenizer/context changes as the next large lever.
+### H100-Next-2: Tokenizer/data sprint, SP2048 [KNOWN, H100-ONLY]
+**What**: Retokenize the same docs with `data/tokenizer_specs_sp2048.json`, run `research_sp2048_h100.sh`, then run a small TTT sweep on that checkpoint if the post-quant result is competitive.
+**Why**: SP1024 is the ceiling bottleneck. SP2048 is the safest one-day tokenizer jump because it should preserve the 16MB budget with fp16 tied embeddings, unlike SP4096/SP8192 which likely need a broader quantization rewrite.
 
-### H100-Next-3: 11L architectural refinement in isolation [KNOWN, LOW PRIORITY]
+### H100-Next-3: SP4096 only if SP2048 is clearly alive [KNOWN, HIGH RISK]
+**What**: If SP2048 gives a material jump and remains under artifact budget, consider SP4096 with explicit artifact checks.
+**Why**: Public SOTA direction points to larger tokenizers, but SP4096 is risky in this codebase without mixed embedding quantization.
+
+### H100-Next-4: 11L architectural refinement in isolation [KNOWN, LOW PRIORITY]
 **What**: If needed, test one low-risk 11L-only attention refinement, with everything else held fixed and **EMA off**.
 **Why**: The 13L path is currently dead, and local screens killed QK gain, Polar Express, DyT, and deep supervision for immediate promotion.
 

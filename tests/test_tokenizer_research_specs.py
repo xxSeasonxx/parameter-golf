@@ -42,6 +42,20 @@ def test_research_tokenizer_config_is_larger_vocab_only():
     ]
 
 
+def test_sp2048_tokenizer_config_is_single_full_run_target():
+    specs = load_specs(ROOT / "data" / "tokenizer_specs_sp2048.json")
+
+    assert specs == [
+        {
+            "name": "sp_bpe_2048",
+            "dataset_suffix": "sp2048",
+            "vocab_size": 2048,
+            "model_prefix": "fineweb_2048_bpe",
+        }
+    ]
+    assert tokenizer_kind(specs[0]) == "sentencepiece_bpe"
+
+
 def test_research_tokenizer_identifiers_are_unique_and_uint16_safe():
     specs = load_specs(ROOT / "data" / "tokenizer_specs_research.json")
 

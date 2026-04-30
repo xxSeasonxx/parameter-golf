@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# H100 eval-only TTT ablation on an existing corrected checkpoint.
-# Purpose: sweep TTT params without spending another 10-minute training run.
-#
-# Read first:
-# - PROJECT.md
-# - BASELINE.md
-# - NEXT_EXPERIMENT.md
+# H100 SP2048 research run. This is intentionally not an active baseline runner.
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-export RUN_ID="${RUN_ID:-h100_ttt_eval_only}"
+export RUN_ID="${RUN_ID:-h100_sp2048}"
+export DATA_PATH="${DATA_PATH:-./data/research_tokenizers/datasets/fineweb10B_sp2048}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/research_tokenizers/tokenizers/fineweb_2048_bpe.model}"
+export VOCAB_SIZE=2048
+
 export NUM_LAYERS=11
 export INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb
 export MUON_WEIGHT_DECAY=0.10
@@ -28,14 +26,17 @@ export QAT_EVERY=10
 export USE_ZSTD=1
 export ZSTD_LEVEL=22
 export EMA_DECAY=0
-export EXPECTED_TRAIN_SHARDS=195
 
-# Eval-only checkpoint path. Defaults to the artifact produced by h100_l0_only.sh.
-export EVAL_ONLY_CHECKPOINT="${EVAL_ONLY_CHECKPOINT:-./final_model.int8.ptz}"
-export EVAL_ONLY_SKIP_ROUNDTRIP="${EVAL_ONLY_SKIP_ROUNDTRIP:-1}"
+dataset_dir="${DATA_PATH%/}"
+if [ ! -d "$dataset_dir" ]; then
+  echo "missing DATA_PATH: $dataset_dir" >&2
+  echo "build it with data/download_hf_docs_and_tokenize.py and data/tokenizer_specs_sp2048.json" >&2
+  exit 1
+fi
+actual_train_shards="$(find "$dataset_dir" -maxdepth 1 -name 'fineweb_train_*.bin' | wc -l | tr -d ' ')"
+export EXPECTED_TRAIN_SHARDS="${EXPECTED_TRAIN_SHARDS:-$actual_train_shards}"
+
 export EVAL_STRIDE=64
-
-# TTT parameters are intentionally env-overridable for ablation sweeps.
 export TTT_LORA_RANK="${TTT_LORA_RANK:-8}"
 export TTT_LORA_LR="${TTT_LORA_LR:-0.003}"
 export TTT_CHUNK_SIZE="${TTT_CHUNK_SIZE:-128}"
@@ -43,7 +44,6 @@ export TTT_EVAL_SEQ_LEN="${TTT_EVAL_SEQ_LEN:-1024}"
 export TTT_BATCH_SIZE="${TTT_BATCH_SIZE:-64}"
 export TTT_EPOCHS="${TTT_EPOCHS:-1}"
 
-# Explicitly keep killed/deferred paths off for attribution.
 export DEEP_SUPERVISION=0
 export USE_POLAR_EXPRESS=0
 export USE_DYT_NORM=0

@@ -97,7 +97,7 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 
 The trusted corrected H100 baseline is commit `87b4a2f` / `h100_l0_only_20260430_042516`: full `195/195` shards, `6535` steps, `91.50ms/step`, post-quant exact `1.20303259`, TTT `1.2162`, artifact `14.18MB`.
 
-Use the post-quant exact score as the active baseline. Current LoRA TTT is harmful on this checkpoint and must be retuned before it is used as the reported score.
+The current best H100 score is the follow-up tuned TTT result on commit `d0b36ca`: fresh post-quant exact `1.19775040`, best legal score-first TTT `1.1966` with `TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128`, artifact `14.16MB`.
 
 Keep for baseline/control runs:
 - `NUM_LAYERS=11`
@@ -113,7 +113,7 @@ Keep for baseline/control runs:
 - `USE_ZSTD=1 ZSTD_LEVEL=22`
 - `EMA_DECAY=0`
 
-Next H100 step: eval-only TTT ablations on `final_model.int8.ptz` using the corrected control checkpoint. Do not rerun deep supervision.
+Next H100 step: tight eval-only TTT refinement around rank8/lr0.003/chunk128, then an SP2048 tokenizer/data run via `data/tokenizer_specs_sp2048.json` and `research_sp2048_h100.sh`. Do not rerun deep supervision.
 
 ## H100 Corrected Eval Cycle (2026-04-30)
 
