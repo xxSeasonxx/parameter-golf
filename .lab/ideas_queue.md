@@ -72,7 +72,7 @@ Run these in order:
 
 **Goal**: Three original innovations, each tested in A/B isolation against current best baseline.
 **Baseline**: val_bpb=1.6215 (exp_063, commit e8addc5)
-**Target**: H100 competition (leaderboard 1.1194, our best 1.2087, gap 0.089 BPB)
+**Target**: H100 competition (leaderboard reference 1.1194 in this historical sprint section; trusted H100 baseline 1.2102, gap 0.091 BPB)
 **Philosophy**: Fix the training-eval objective mismatch, inject gradient signal deeper, use compute more efficiently.
 
 ### ~~Experiment 071: Baseline Reconfirm~~ COMPLETED -- CONTROL

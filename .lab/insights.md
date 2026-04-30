@@ -93,11 +93,25 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 
 - **Sliding window (EVAL_STRIDE=64)**: Implemented. ~0.03 BPB gain. ~50 min on Apple Silicon — use on 8xH100 only.
 
-## Porting to 8xH100
+## Active H100 Baseline Stack
 
-Must port: (1) Muon WD + warmdown schedule, (2) FP16 tok_emb, (3) freq-decomposed skip gating, (4) sliding window eval, (5) LeakyReLU(0.5)² activation, (6) EMA (decay=0.997) — validated by top teams on H100, killed on Mac.
-Env vars: NUM_LAYERS=11 (free on H100), MLP_MULT_ASYMMETRIC=2,4, MUON_WEIGHT_DECAY=0.10, GRAD_CLIP_NORM=0.5, LAYER_LR_SCALE=0.5, WARMUP_STEPS=50, QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10.
-Expected baseline: ~1500-2000 steps, val_bpb ~1.18-1.20.
+The trusted H100 baseline is `baseline-3e34098` / `clean_11l_no_ema`: full `195/195` shards, `8007` steps, `74.95ms/step`, post-quant `1.2316`, TTT `1.2102`, artifact `14.48MB`.
+
+Keep for baseline/control runs:
+- `NUM_LAYERS=11`
+- `INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb`
+- `MUON_WEIGHT_DECAY=0.10`
+- `FREQ_SKIP_GATING=1`
+- `TRAIN_BATCH_TOKENS=524288`
+- `MLP_MULT_ASYMMETRIC=2,4`
+- `GRAD_CLIP_NORM=0.5`
+- `LAYER_LR_SCALE=0.5`
+- `WARMUP_STEPS=50`
+- `QAT_PREWARMDOWN=1 QAT_STRENGTH=0.1 QAT_STOP_LR_MUL=0.8 QAT_EVERY=10`
+- `USE_ZSTD=1 ZSTD_LEVEL=22`
+- `EMA_DECAY=0`
+
+Next H100 run: isolated deep supervision on this clean 11L stack (`DEEP_SUPERVISION=1`, `DEEP_SUPERVISION_ALPHA=0.05`, `DEEP_SUPERVISION_LAYERS=3,7`) with EMA off.
 
 ## H100 RunPod Results (2026-04-03)
 
@@ -183,4 +197,4 @@ After 27 experiments at the current config level (exp_035-061), Apple Silicon va
 - **Lighter deep supervision is KILLED on Mac [OUR TWIST]**: Reducing to taps `[3,7]` with `alpha=0.05` removes most of the overhead but also removes the useful per-step signal. Step-200 BPB is **2.0766** vs baseline **2.0717**. This weakens the case for deep supervision variants in the local loop.
 - **Refined sequence curriculum is KILLED on Mac**: The simpler schedule `256:0.10,512:0.30,1024:1.0` reaches only **703** steps and **1.6387** BPB in 600s, worse than both the frozen baseline and the original curriculum attempt. Kill curriculum for local iteration.
 - **Decoder-only pre-warmdown QAT is interesting but KILLED on Mac [ORIGINAL]**: Restricting QAT noise to decoder blocks gives a tiny smoke win (**2.0709** vs **2.0717** at step 200) but loses at medium scale: **1.6283** BPB at **654** steps. The decoder-focused signal is real but not strong enough to pay for the extra step-time on Apple Silicon.
-- **Next H100 session should be diagnostic, not feature-stacked**: Since the local sprint found no portable winner, the next RunPod budget should go to (1) a clean 11L repro on `train_gpt.py` with full 195 shards and no EMA, (2) a 13L `int8+zstd` capacity run with no EMA, and (3) an isolated EMA run only after the clean repro is trustworthy.
+- **The H100 diagnostic session is complete**: clean 11L full-shard repro is trusted; current 13L recipe and EMA(0.997) are killed in this codebase. The next RunPod budget should test isolated 11L deep supervision with EMA off.

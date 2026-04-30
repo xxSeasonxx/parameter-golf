@@ -5,9 +5,9 @@ This document records all experiments conducted during the `lab/mar26b` session,
 **Session date**: 2026-03-26
 **Branch**: `lab/mar26b`
 **Starting point**: Unmodified `train_gpt_mlx.py` baseline (val_bpb=2.4109 at 200 iters)
-**Final best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)²)
-**Latest**: H100 repro cycle (clean 11L full-shard baseline established; 13L recipe and EMA discarded)
-**H100 best**: TTT BPB **1.2087** (run1_baseline: 11L int8 zlib, 6421 steps, 80/195 shards)
+**Final Mac best**: val_bpb=**1.6215** (commit `e8addc5`, exp_063 LeakyReLU(0.5)^2)
+**Trusted H100 baseline**: TTT BPB **1.2102** (`clean_11l_no_ema`: 11L int8+zstd-22, full 195 shards, tag `baseline-3e34098`)
+**Next H100 experiment**: isolated 11L deep supervision, EMA off (`h100_next_deep_supervision.sh`)
 
 ---
 
