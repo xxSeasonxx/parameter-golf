@@ -14,12 +14,12 @@ The trusted H100 baseline is documented in `BASELINE.md`.
 
 Short version:
 
-- tag: `baseline-3e34098`
+- commit: `87b4a2f`
 - script: `train_gpt.py`
-- run: clean 11L full-shard H100 repro
-- post-quant BPB: `1.2316`
-- TTT BPB: `1.2102`
-- artifact: `14.48MB`
+- run: corrected clean 11L full-shard H100 control
+- post-quant exact BPB: `1.20303259`
+- TTT BPB: `1.2162` (harmful; do not use unless retuned)
+- artifact: `14.18MB`
 
 EMA(0.997), the current 13L recipe, SWA, int6 without STE/GPTQ, progressive growth, and old feature-stacked runners are not the baseline.
 
@@ -27,14 +27,12 @@ EMA(0.997), the current 13L recipe, SWA, int6 without STE/GPTQ, progressive grow
 
 The active next experiment is documented in `NEXT_EXPERIMENT.md`.
 
-Short version: run the clean 11L H100 baseline plus isolated deep supervision:
+Short version: deep supervision was run and discarded. The next RunPod step is
+TTT eval-only ablation on the corrected control checkpoint, because current TTT
+regresses from post-quant `1.20303259` to `1.2162`.
 
-- `DEEP_SUPERVISION=1`
-- `DEEP_SUPERVISION_ALPHA=0.05`
-- `DEEP_SUPERVISION_LAYERS=3,7`
-- `EMA_DECAY=0`
-
-Use `h100_l0_only.sh` as the sliding-window control and `h100_next_deep_supervision.sh` as the next experiment runner.
+Use `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz` with
+`EVAL_ONLY_SKIP_ROUNDTRIP=1` to sweep TTT settings without retraining.
 
 ## Required reading order
 

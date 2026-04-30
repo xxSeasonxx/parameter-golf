@@ -12,23 +12,29 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 
 ## START HERE: Next H100 Session
 
-**Goal**: Build on the cleaned full-shard 11L repro. The diagnostic cycle resolved the runner/data questions and killed both the current 13L recipe and EMA in this codebase.
+**Goal**: Build on the corrected full-shard 11L control. The eval/accounting repair improved post-quant BPB and showed that the current TTT path is harmful.
 **Current best**: val_bpb=1.6215 (exp_063, commit e8addc5)
-**Best trustworthy H100 result**: TTT BPB 1.2102 (`clean_11l_no_ema`) | Leaderboard: 1.1194 | Gap: 0.091
+**Best trustworthy H100 result**: post-quant exact BPB `1.20303259` (`h100_l0_only_20260430_042516`, commit `87b4a2f`). Current TTT regresses to `1.2162`.
 
 Run these in order:
 
-### H100-Next-1: 11L + Deep Supervision, no EMA [OUR TWIST, H100-ONLY]
-**What**: Re-run the clean 11L H100 baseline with `DEEP_SUPERVISION=1`, `DEEP_SUPERVISION_ALPHA=0.05`, `DEEP_SUPERVISION_LAYERS=3,7`, and **EMA off**.
-**Why**: This remains the strongest surviving H100-only idea. The original Mac run improved per-step quality but lost on overhead; the lighter Mac variant removed the gain entirely, so the question is now purely H100-side.
+### H100-Next-1: TTT eval-only ablation on corrected checkpoint [KNOWN, H100-ONLY]
+**What**: Keep training fixed and run `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz EVAL_ONLY_SKIP_ROUNDTRIP=1` while sweeping only `TTT_LORA_RANK`, `TTT_LORA_LR`, and `TTT_CHUNK_SIZE`.
+**Why**: The corrected post-quant checkpoint is `1.20303259`, but current TTT worsens it to `1.2162`. Eval-only sweeps are much cheaper than full retraining and directly test whether TTT can still be useful.
 
-### H100-Next-2: TTT improvement on clean 11L [KNOWN, H100-ONLY]
-**What**: Keep training fixed at the clean 11L config and improve the evaluation path only.
-**Why**: The current clean baseline already gets to `1.2102` TTT. Most of the remaining gap is now likely in test-time adaptation rather than base training throughput or EMA.
+### H100-Next-2: Tokenizer/data sprint, SP2048 or SP4096 [KNOWN, H100-ONLY]
+**What**: If TTT cannot beat `1.20303259`, retokenize the same docs with a larger SentencePiece vocabulary and run a clean H100 calibration.
+**Why**: Small SP1024 toggles are not closing the gap. Public leaderboard direction and first principles both point to tokenizer/context changes as the next large lever.
 
 ### H100-Next-3: 11L architectural refinement in isolation [KNOWN, LOW PRIORITY]
-**What**: If needed, test one 11L-only architectural change such as XSA on the last decoder layers, with everything else held fixed and **EMA off**.
-**Why**: The 13L path is currently dead, so any additional model-side gain should come from a low-risk 11L refinement rather than another capacity jump.
+**What**: If needed, test one low-risk 11L-only attention refinement, with everything else held fixed and **EMA off**.
+**Why**: The 13L path is currently dead, and local screens killed QK gain, Polar Express, DyT, and deep supervision for immediate promotion.
+
+### ~~H100-Next-0: Corrected clean 11L control~~ COMPLETED -- KEEP
+**Result**: `195/195` shards, `6535` steps, `91.50ms/step`, post-quant exact `1.20303259`, TTT `1.2162`, artifact `14.18MB`. This is now the trusted H100 baseline.
+
+### ~~H100-Next-0b: Corrected 11L + deep supervision~~ COMPLETED -- DISCARD
+**Result**: `195/195` shards, `6549` steps, post-quant exact `1.20610810`, TTT `1.2192`, artifact `14.09MB`. Worse than corrected control; kill deep supervision.
 
 ### ~~H100-Next-1: Clean 11L repro, no EMA~~ COMPLETED -- KEEP
 **Result**: `195/195` shards, `8007` steps, `74.95ms/step`, raw `1.2282`, post-quant `1.2316`, TTT `1.2102`, artifact `14.48MB`. This is now the trusted H100 baseline.

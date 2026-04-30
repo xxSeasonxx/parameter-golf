@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+import torch
 import train_gpt as tg
 
 
@@ -88,3 +89,10 @@ def test_stopping_early_train_time_includes_active_elapsed_segment():
 def test_expected_train_shards_guard_rejects_partial_dataset():
     with pytest.raises(RuntimeError, match="train_shards:80/195"):
         tg.validate_expected_train_shards(actual=80, expected=195)
+
+
+def test_load_eval_checkpoint_state_raw_state_dict(tmp_path):
+    path = tmp_path / "model.pt"
+    torch.save({"w": torch.tensor([1.0, 2.0])}, path)
+    loaded = tg.load_eval_checkpoint_state(path)
+    assert torch.equal(loaded["w"], torch.tensor([1.0, 2.0]))

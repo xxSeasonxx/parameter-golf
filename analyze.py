@@ -240,12 +240,18 @@ def parse_log(log_path):
 
 
 def get_val_bpb(parsed):
-    """Get the best val_bpb from parsed log, preferring final roundtrip metric."""
+    """Get the best legal final val_bpb from parsed log.
+
+    TTT is legal only as an evaluation method. It should improve the reported
+    score; if it regresses, use the exact post-quant roundtrip result instead.
+    """
     s = parsed["summary"]
-    # Priority: TTT > exact roundtrip > roundtrip > last val step
-    for key in ["ttt_val_bpb", "final_val_bpb", "roundtrip_val_bpb"]:
-        if key in s:
-            return s[key]
+    roundtrip_bpb = s.get("final_val_bpb", s.get("roundtrip_val_bpb"))
+    ttt_bpb = s.get("ttt_val_bpb")
+    if ttt_bpb is not None and (roundtrip_bpb is None or ttt_bpb < roundtrip_bpb):
+        return ttt_bpb
+    if roundtrip_bpb is not None:
+        return roundtrip_bpb
     if parsed["val_steps"]:
         return parsed["val_steps"][-1]["val_bpb"]
     return None

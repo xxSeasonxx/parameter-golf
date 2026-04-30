@@ -96,6 +96,32 @@ def validate_expected_train_shards(actual: int, expected: int) -> None:
         )
 
 
+def load_eval_checkpoint_state(path: str | Path) -> dict[str, Tensor]:
+    """Load a raw state_dict or compressed int8 checkpoint for eval-only sweeps."""
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"EVAL_ONLY_CHECKPOINT not found: {checkpoint_path}")
+    if checkpoint_path.suffix != ".ptz":
+        return torch.load(checkpoint_path, map_location="cpu")
+
+    blob = checkpoint_path.read_bytes()
+    errors: list[str] = []
+    if zstd_mod is not None:
+        try:
+            raw = zstd_mod.ZstdDecompressor().decompress(blob)
+            quant_state = torch.load(io.BytesIO(raw), map_location="cpu")
+            return dequantize_state_dict_int8(quant_state)
+        except Exception as exc:  # pragma: no cover - depends on input compression
+            errors.append(f"zstd: {exc}")
+    try:
+        raw = zlib.decompress(blob)
+        quant_state = torch.load(io.BytesIO(raw), map_location="cpu")
+        return dequantize_state_dict_int8(quant_state)
+    except Exception as exc:
+        errors.append(f"zlib: {exc}")
+    raise RuntimeError(f"Could not load compressed int8 checkpoint {checkpoint_path}: {'; '.join(errors)}")
+
+
 class Hyperparameters(_CommonHyperparameters):
     # PyTorch-only fields (TTT-LoRA, EMA, layer growth, zstd, calibrated quant,
     # plus train_files/val_files convenience strings and the non-tied embed/head LRs).
@@ -119,6 +145,8 @@ class Hyperparameters(_CommonHyperparameters):
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 256))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 1024))
     ttt_batch_size = int(os.environ.get("TTT_BATCH_SIZE", 64))
+    eval_only_checkpoint = os.environ.get("EVAL_ONLY_CHECKPOINT", "")
+    eval_only_skip_roundtrip = bool(int(os.environ.get("EVAL_ONLY_SKIP_ROUNDTRIP", "0")))
 
 # Muon optimizer (from modded-nanogpt, see https://kellerjordan.github.io/posts/muon/)
 
@@ -1345,6 +1373,59 @@ def main() -> None:
     log0(f"seed:{args.seed}")
     for line in describe_feature_flags(args, effective_num_layers):
         log0(line)
+
+    if args.eval_only_checkpoint:
+        log0(f"eval_only_checkpoint:{args.eval_only_checkpoint}")
+        base_model.load_state_dict(load_eval_checkpoint_state(args.eval_only_checkpoint), strict=True)
+        base_model.eval()
+
+        if args.eval_only_skip_roundtrip:
+            log0("eval_only_skip_roundtrip:1")
+        else:
+            eval_fn = eval_val_sliding if args.eval_stride > 0 else eval_val
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            torch.cuda.synchronize()
+            t_qeval = time.perf_counter()
+            q_val_loss, q_val_bpb = eval_fn(
+                args,
+                model,
+                rank,
+                world_size,
+                device,
+                grad_accum_steps,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+            )
+            torch.cuda.synchronize()
+            compress_name = get_compression_name(args, zstd_available=zstd_mod is not None)
+            log0(
+                f"{final_roundtrip_log_prefix(compress_name)} eval_stride:{args.eval_stride} "
+                f"val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
+                f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
+            )
+            log0(
+                f"{final_roundtrip_log_prefix(compress_name)}_exact eval_stride:{args.eval_stride} "
+                f"val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}"
+            )
+
+        torch._dynamo.reset()
+        torch.cuda.synchronize()
+        t_ttt = time.perf_counter()
+        ttt_val_loss, ttt_val_bpb = eval_val_ttt_lora(
+            args, base_model, rank, world_size, device,
+            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+        )
+        torch.cuda.synchronize()
+        log0(
+            f"final_int8_ttt_lora val_loss:{ttt_val_loss:.4f} val_bpb:{ttt_val_bpb:.4f} "
+            f"eval_time:{1000.0 * (time.perf_counter() - t_ttt):.0f}ms"
+        )
+        if distributed:
+            dist.destroy_process_group()
+        return
 
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
 

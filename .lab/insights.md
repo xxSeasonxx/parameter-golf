@@ -95,7 +95,9 @@ Note: LeakyReLU(0.5)² activation is in the code (replaces relu²), not an env v
 
 ## Active H100 Baseline Stack
 
-The trusted H100 baseline is `baseline-3e34098` / `clean_11l_no_ema`: full `195/195` shards, `8007` steps, `74.95ms/step`, post-quant `1.2316`, TTT `1.2102`, artifact `14.48MB`.
+The trusted corrected H100 baseline is commit `87b4a2f` / `h100_l0_only_20260430_042516`: full `195/195` shards, `6535` steps, `91.50ms/step`, post-quant exact `1.20303259`, TTT `1.2162`, artifact `14.18MB`.
+
+Use the post-quant exact score as the active baseline. Current LoRA TTT is harmful on this checkpoint and must be retuned before it is used as the reported score.
 
 Keep for baseline/control runs:
 - `NUM_LAYERS=11`
@@ -111,7 +113,22 @@ Keep for baseline/control runs:
 - `USE_ZSTD=1 ZSTD_LEVEL=22`
 - `EMA_DECAY=0`
 
-Next H100 run: isolated deep supervision on this clean 11L stack (`DEEP_SUPERVISION=1`, `DEEP_SUPERVISION_ALPHA=0.05`, `DEEP_SUPERVISION_LAYERS=3,7`) with EMA off.
+Next H100 step: eval-only TTT ablations on `final_model.int8.ptz` using the corrected control checkpoint. Do not rerun deep supervision.
+
+## H100 Corrected Eval Cycle (2026-04-30)
+
+Two full-shard runs on commit `87b4a2f` after the eval/accounting repair:
+
+| Run | Config | Steps | Post-quant exact | TTT BPB | Artifact |
+|-----|--------|-------|------------------|---------|----------|
+| 1 | clean 11L corrected control | 6535 | **1.20303259** | 1.2162 | 14.18MB |
+| 2 | clean 11L + deep supervision | 6549 | 1.20610810 | 1.2192 | 14.09MB |
+
+**Key learnings**:
+- **Corrected sliding eval improved the clean post-quant score materially**: active baseline is now `1.20303259`, not the old `1.2316` post-quant row.
+- **TTT is currently harmful**: current LoRA TTT regresses the control from `1.20303259` to `1.2162`. Treat TTT as an eval path to ablate, not as the default score.
+- **Deep supervision is killed for now**: it regressed post-quant by `+0.00308` BPB and TTT by `+0.0030` BPB versus the corrected control.
+- **Small local SP1024 toggles did not survive**: QK gain looked good at 200-step smoke but failed a 700-step medium A/B; Polar Express and DyT were neutral at 200 steps.
 
 ## H100 RunPod Results (2026-04-03)
 
@@ -151,7 +168,7 @@ Three-run full-shard repro cycle on commit `3e34098` using the cleaned `train_gp
 
 ## Competition Strategy (8xH100 target: ≤1.12 BPB)
 
-**Leaderboard top**: 1.1194. Our best trustworthy H100 result is now **1.2102 TTT BPB** on the clean 11L full-shard repro. Gap: **0.091 BPB**.
+**Active trustworthy H100 result**: corrected clean 11L post-quant exact **1.20303259**. The current TTT path regresses to `1.2162`, so the active gap is larger than the old docs implied.
 
 **What the repro cycle resolved**:
 - Data coverage and runner trust are no longer the main uncertainty: clean 11L reproduces the old H100 regime on the full dataset.
@@ -159,9 +176,9 @@ Three-run full-shard repro cycle on commit `3e34098` using the cleaned `train_gp
 - `EMA(0.997)` is not a promising next lever in this codebase.
 
 **Most plausible next H100-only levers**:
-1. **Deep supervision on clean 11L** — still the best surviving H100-only candidate from local work.
-2. **TTT improvement** — the current LoRA TTT path is competitive but still leaves ~0.09 BPB on the table.
-3. **11L architectural refinement in isolation** — e.g. XSA or another low-risk 11L-only idea, but not feature-stacked.
+1. **TTT repair/ablation on the corrected checkpoint** — current LoRA TTT is legal but harmful, so this is the cheapest high-signal next step.
+2. **Tokenizer/data sprint** — SP2048 or SP4096 is the first model-side direction if TTT cannot beat post-quant.
+3. **11L architectural refinement in isolation** — e.g. a low-risk attention refinement, but not another feature stack.
 
 **Our original contributions** (differentiators):
 1. Warmdown-aware WD scheduling: `wd = base_wd * (2 - lr_mul)` — proven, unique
@@ -197,4 +214,4 @@ After 27 experiments at the current config level (exp_035-061), Apple Silicon va
 - **Lighter deep supervision is KILLED on Mac [OUR TWIST]**: Reducing to taps `[3,7]` with `alpha=0.05` removes most of the overhead but also removes the useful per-step signal. Step-200 BPB is **2.0766** vs baseline **2.0717**. This weakens the case for deep supervision variants in the local loop.
 - **Refined sequence curriculum is KILLED on Mac**: The simpler schedule `256:0.10,512:0.30,1024:1.0` reaches only **703** steps and **1.6387** BPB in 600s, worse than both the frozen baseline and the original curriculum attempt. Kill curriculum for local iteration.
 - **Decoder-only pre-warmdown QAT is interesting but KILLED on Mac [ORIGINAL]**: Restricting QAT noise to decoder blocks gives a tiny smoke win (**2.0709** vs **2.0717** at step 200) but loses at medium scale: **1.6283** BPB at **654** steps. The decoder-focused signal is real but not strong enough to pay for the extra step-time on Apple Silicon.
-- **The H100 diagnostic session is complete**: clean 11L full-shard repro is trusted; current 13L recipe and EMA(0.997) are killed in this codebase. The next RunPod budget should test isolated 11L deep supervision with EMA off.
+- **The H100 diagnostic session is superseded by the corrected eval cycle**: clean 11L full-shard repro is trusted, current 13L recipe and EMA(0.997) are killed, and deep supervision has now also been killed on H100. The next RunPod budget should go to TTT eval-only ablations or tokenizer/data work.

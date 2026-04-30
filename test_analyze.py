@@ -84,6 +84,14 @@ final_int8_zstd-22_roundtrip_exact eval_stride:64 val_loss:2.09081234 val_bpb:1.
 final_int8_ttt_lora val_loss:2.0545 val_bpb:1.2102 eval_time:310000ms
 """
 
+SAMPLE_PYTORCH_TTT_REGRESSION_LOG = """\
+run_id:h100_l0_only
+Serialized model int8+zstd-22: 14184763 bytes
+final_int8_zstd-22_roundtrip eval_stride:64 val_loss:2.0313 val_bpb:1.2030 eval_time:82909ms
+final_int8_zstd-22_roundtrip_exact eval_stride:64 val_loss:2.03127014 val_bpb:1.20303259
+final_int8_ttt_lora val_loss:2.0536 val_bpb:1.2162 eval_time:86924ms
+"""
+
 SAMPLE_MLX_ARTIFACT_LOG = """\
 run_id:mlx_smoke
 step:1/200 train_loss:6.9428 train_time:263ms step_avg:263.06ms tok_s:31142
@@ -251,9 +259,13 @@ class TestPyTorchLogParsing:
         assert abs(s["final_val_loss"] - 2.09081234) < 1e-8
         assert abs(s["final_val_bpb"] - 1.23163600) < 1e-8
 
-    def test_zstd_get_val_bpb_prefers_ttt(self):
+    def test_zstd_get_val_bpb_uses_ttt_when_it_improves(self):
         parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
         assert abs(get_val_bpb(parsed) - 1.2102) < 1e-6
+
+    def test_zstd_get_val_bpb_uses_roundtrip_when_ttt_regresses(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_TTT_REGRESSION_LOG))
+        assert abs(get_val_bpb(parsed) - 1.20303259) < 1e-8
 
     def test_active_feature_config_lines_captured(self):
         parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))

@@ -63,3 +63,5 @@ e8addc5	1.6446	14102619	discard	exp_070: MODEL_DIM=544 (27.2M params) — +0.023
 3e34098	1.231636	14479660	keep	H100 clean_11l_no_ema: full 195 shards, zstd-22, 8007 steps at 74.95ms/step, post-quant 1.2316, TTT 1.2102. Trusted baseline repro
 3e34098	1.244190	14744791	discard	H100 capacity_13l_no_ema: 13L int8+zstd + calibrated quant, 6984 steps at 85.92ms/step, post-quant 1.2442, TTT 1.2280. Worse than clean 11L
 3e34098	1.372394	14536086	discard	H100 ema_11l: isolated EMA decay=0.997, raw 1.2291 but post-EMA final 1.3724 and TTT 1.3035. EMA killed in this codebase
+87b4a2f	1.203033	14184763	keep	H100 corrected h100_l0_only: full 195 shards, 6535 steps, post-quant exact 1.20303259, TTT regressed to 1.2162. Use post-quant score.
+87b4a2f	1.206108	14085158	discard	H100 corrected deep supervision: full 195 shards, 6549 steps, post-quant exact 1.20610810, TTT regressed to 1.2192. Worse than corrected control; kill deep supervision.

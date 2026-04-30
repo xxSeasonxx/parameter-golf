@@ -1,62 +1,70 @@
 # H100 Next Experiment
 
-## Goal
+## Current State
 
-Test whether deep supervision improves the trusted clean 11L H100 baseline without stacking unrelated features.
+The previous next experiment, isolated deep supervision on the clean 11L stack,
+has been run and discarded.
 
-## Baseline
+Corrected H100 control on commit `87b4a2f`:
 
-Compare against `baseline-3e34098` / `clean_11l_no_ema`:
+| Metric | Value |
+|---|---:|
+| Run | `h100_l0_only_20260430_042516` |
+| Train shards | `195/195` |
+| Steps | `6535/20000` |
+| Step time | `91.50ms/step` |
+| Post-quant exact BPB | `1.20303259` |
+| TTT BPB | `1.2162` |
+| Artifact | `14,184,763 bytes` |
 
-- post-quant BPB: `1.2316`
-- TTT BPB: `1.2102`
-- artifact: `14.48MB`
+Deep supervision on the same commit:
 
-## Experiment
+| Metric | Value |
+|---|---:|
+| Run | `h100_next_deep_supervision_20260430_044023` |
+| Train shards | `195/195` |
+| Steps | `6549/20000` |
+| Post-quant exact BPB | `1.20610810` |
+| TTT BPB | `1.2192` |
+| Artifact | `14,085,158 bytes` |
 
-Run `h100_next_deep_supervision.sh`.
+Decision: **kill deep supervision for now**. It regressed both post-quant and
+TTT versus the corrected control.
 
-This starts from the clean 11L baseline stack and adds only:
+## Next RunPod Step
+
+Do not spend another full H100 training run on deep supervision, QK gain, Polar
+Express, or DyT. Local MLX screens on 2026-04-30 did not produce a survivor.
+
+The next RunPod work should tune/evaluate the TTT path on the existing corrected
+control checkpoint, because current TTT is actively harmful:
+
+- post-quant exact: `1.20303259`
+- current TTT: `1.2162`
+- regression: `+0.0132 BPB`
+
+Use `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz` with `EVAL_ONLY_SKIP_ROUNDTRIP=1`
+to run TTT ablations without retraining. First reproduce the current TTT score,
+then sweep only TTT params:
 
 ```bash
-DEEP_SUPERVISION=1
-DEEP_SUPERVISION_ALPHA=0.05
-DEEP_SUPERVISION_LAYERS=3,7
+TTT_LORA_RANK=8 TTT_LORA_LR=0.01 TTT_CHUNK_SIZE=256
+TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256
+TTT_LORA_RANK=8 TTT_LORA_LR=0.001 TTT_CHUNK_SIZE=256
+TTT_LORA_RANK=4 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256
+TTT_LORA_RANK=4 TTT_LORA_LR=0.001 TTT_CHUNK_SIZE=256
+TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128
+TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=512
 ```
-
-It keeps:
-
-```bash
-EMA_DECAY=0
-USE_ZSTD=1
-ZSTD_LEVEL=22
-EVAL_STRIDE=64
-```
-
-It does not enable DyT, Polar Express, EMA, 13L capacity, calibrated quant, layer growth, or extended TTT.
-
-## Control
-
-Run `h100_l0_only.sh` first if the stride-64 timing budget has not been verified on the current RunPod image.
-
-If stride-64 eval exceeds the evaluation budget, update this file before launching the deep-supervision run. Do not silently change the runner.
 
 ## Decision Rule
 
-Promote deep supervision only if:
+Promote a TTT config only if it beats the corrected post-quant exact baseline:
 
-- TTT BPB improves by at least `0.005` versus `1.2102`, and
-- training plus final eval stay inside the challenge budget, and
-- artifact remains under `16,000,000` bytes.
+- strong promote: TTT BPB `<= 1.2000`
+- weak promote: TTT BPB `< 1.20303259`
+- kill TTT path: no ablation beats `1.20303259`
 
-Kill or revise deep supervision if:
-
-- TTT BPB regresses, or
-- eval exceeds the budget, or
-- artifact exceeds `16,000,000` bytes.
-
-Treat the result as neutral if:
-
-- TTT BPB improves by less than `0.005`.
-
-If neutral, the next round should focus on TTT evaluation improvements, not EMA, SWA, current 13L capacity, or progressive growth.
+If TTT remains worse, report/post only the post-quant exact score and move the
+next research sprint to tokenizer/data work (`SP2048` or `SP4096`) or a larger
+architecture change. Small SP1024 toggles are not closing the leaderboard gap.
