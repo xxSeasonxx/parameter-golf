@@ -1,11 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# Run 3: H100-ONLY TECHNIQUES (SWA + ZSTD)
+# Run 3: EMA + ZSTD COMPARISON
 # =============================================================================
-# Question: How much does SWA add with 1500+ steps? How much does zstd save?
-# Config:   11 layers, int8, zstd, SWA (last 10% of LR, every 5 steps)
-# Expected: SWA was killed on Mac (700 steps, no oscillation). H100 has 1500+
-#           steps — enough oscillation for averaging to help. Zstd is free.
+# Legacy filename retained for compatibility with existing launch references.
+# Question: Does EMA improve the 11-layer zstd run supported by train_gpt.py?
+# Config:   11 layers, int8, zstd, EMA_DECAY=0.997
+# Expected: Clean comparison against Run 1 with EMA and zstd enabled.
 # =============================================================================
 set -euo pipefail
 
@@ -29,9 +29,8 @@ export QAT_STRENGTH=0.1
 export QAT_STOP_LR_MUL=0.8
 export QAT_EVERY=10
 
-# SWA — average snapshots when lr_mul < 0.1 (last ~10%), every 5 steps
-export SWA_START_LR_MUL=0.1
-export SWA_EVERY=5
+# EMA
+export EMA_DECAY=0.997
 
 # Training
 export TRAIN_BATCH_TOKENS=524288
@@ -40,8 +39,8 @@ export VAL_LOSS_EVERY=500
 export MAX_WALLCLOCK_SECONDS=600
 
 # Serialization — zstd for better compression, keep int8 (clean comparison vs Run 1)
-export COMPRESSION=zstd
-export QUANT_BITS=8
+export USE_ZSTD=1
+export ZSTD_LEVEL=22
 export INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb
 
-torchrun --nproc_per_node=8 train_gpt_h100.py 2>&1 | tee run3_swa.log
+torchrun --nproc_per_node=8 train_gpt.py 2>&1 | tee run3_swa.log

@@ -1,7 +1,8 @@
-"""
-H100 competition variant of train_gpt.py.
-Ports improvements from train_gpt_mlx.py: asymmetric MLP, frequency-decomposed skip gating,
-warmdown-aware weight decay, per-layer LR scaling, pre-warmdown QAT, SWA, zstd compression, int6.
+"""DEPRECATED: older H100 competition variant.
+
+Use train_gpt.py for all active H100 runs. This file is retained only for
+historical comparison against older RunPod logs and should not be used by root
+runner scripts.
 """
 
 from __future__ import annotations

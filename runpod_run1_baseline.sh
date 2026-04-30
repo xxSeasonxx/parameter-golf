@@ -35,8 +35,7 @@ export VAL_LOSS_EVERY=500
 export MAX_WALLCLOCK_SECONDS=600
 
 # Serialization
-export COMPRESSION=zlib
-export QUANT_BITS=8
+export USE_ZSTD=0
 export INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb
 
-torchrun --nproc_per_node=8 train_gpt_h100.py 2>&1 | tee run1_baseline.log
+torchrun --nproc_per_node=8 train_gpt.py 2>&1 | tee run1_baseline.log
