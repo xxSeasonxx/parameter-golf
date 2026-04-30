@@ -145,6 +145,7 @@ class Hyperparameters(_CommonHyperparameters):
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 256))
     ttt_eval_seq_len = int(os.environ.get("TTT_EVAL_SEQ_LEN", 1024))
     ttt_batch_size = int(os.environ.get("TTT_BATCH_SIZE", 64))
+    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 1))
     eval_only_checkpoint = os.environ.get("EVAL_ONLY_CHECKPOINT", "")
     eval_only_skip_roundtrip = bool(int(os.environ.get("EVAL_ONLY_SKIP_ROUNDTRIP", "0")))
 
@@ -1061,6 +1062,9 @@ def eval_val_ttt_lora(
     eval_seq_len = args.ttt_eval_seq_len
     batch_size = args.ttt_batch_size
     lora_rank = args.ttt_lora_rank
+    ttt_epochs = args.ttt_epochs
+    if ttt_epochs < 1:
+        raise ValueError(f"TTT_EPOCHS must be >= 1, got {ttt_epochs}")
 
     rank_docs.sort(key=lambda d: (d[1] - 2) // chunk_size)
 
@@ -1131,10 +1135,16 @@ def eval_val_ttt_lora(
 
             if needs_train:
                 mask = torch.tensor([float(ci < num_chunks[b] - 1) for b in range(bsz)], device=device)
-                per_doc = ptl[:, chunk_offset:chunk_offset + chunk_size].mean(dim=-1)
-                cur_opt.zero_grad()
-                (per_doc * mask).sum().backward()
-                cur_opt.step()
+                for epoch in range(ttt_epochs):
+                    if epoch == 0:
+                        train_ptl = ptl
+                    else:
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            train_ptl = base_model(x, y, lora=cur_lora)
+                    per_doc = train_ptl[:, chunk_offset:chunk_offset + chunk_size].mean(dim=-1)
+                    cur_opt.zero_grad()
+                    (per_doc * mask).sum().backward()
+                    cur_opt.step()
 
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)

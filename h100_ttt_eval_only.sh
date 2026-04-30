@@ -41,6 +41,7 @@ export TTT_LORA_LR="${TTT_LORA_LR:-0.01}"
 export TTT_CHUNK_SIZE="${TTT_CHUNK_SIZE:-256}"
 export TTT_EVAL_SEQ_LEN="${TTT_EVAL_SEQ_LEN:-1024}"
 export TTT_BATCH_SIZE="${TTT_BATCH_SIZE:-64}"
+export TTT_EPOCHS="${TTT_EPOCHS:-1}"
 
 # Explicitly keep killed/deferred paths off for attribution.
 export DEEP_SUPERVISION=0

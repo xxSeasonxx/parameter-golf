@@ -120,6 +120,7 @@ def test_next_experiment_runner_is_eval_only_ttt_ablation():
         "TTT_LORA_RANK": "${TTT_LORA_RANK:-8}",
         "TTT_LORA_LR": "${TTT_LORA_LR:-0.01}",
         "TTT_CHUNK_SIZE": "${TTT_CHUNK_SIZE:-256}",
+        "TTT_EPOCHS": "${TTT_EPOCHS:-1}",
         "EVAL_STRIDE": "64",
         "USE_ZSTD": "1",
         "VAL_LOSS_EVERY": "0",

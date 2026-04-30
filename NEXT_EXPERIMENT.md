@@ -55,6 +55,7 @@ TTT_LORA_RANK=4 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256
 TTT_LORA_RANK=4 TTT_LORA_LR=0.001 TTT_CHUNK_SIZE=256
 TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=128
 TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=512
+TTT_LORA_RANK=8 TTT_LORA_LR=0.003 TTT_CHUNK_SIZE=256 TTT_EPOCHS=2
 ```
 
 ## Decision Rule
@@ -68,3 +69,23 @@ Promote a TTT config only if it beats the corrected post-quant exact baseline:
 If TTT remains worse, report/post only the post-quant exact score and move the
 next research sprint to tokenizer/data work (`SP2048` or `SP4096`) or a larger
 architecture change. Small SP1024 toggles are not closing the leaderboard gap.
+
+## Local Tokenizer Prep
+
+Keep `data/tokenizer_specs.json` as the SP1024 default. Use
+`data/tokenizer_specs_research.json` only for intentional SP2048/SP4096 research.
+
+First run a smoke export with a small docs/training slice:
+
+```bash
+python3 data/download_hf_docs_and_tokenize.py \
+  --output-root ./data/research_tokenizers \
+  --tokenizer-config ./data/tokenizer_specs_research.json \
+  --tokenizer-train-docs 200000 \
+  --chunk-tokens 1000000
+```
+
+After the smoke export, run a short local MLX check by pointing `DATA_PATH`,
+`TOKENIZER_PATH`, and `VOCAB_SIZE` at either exported tokenizer. Promote to a
+full RunPod export only if the smoke path verifies tokenizer/data pairing,
+artifact accounting, and final BPB eval.

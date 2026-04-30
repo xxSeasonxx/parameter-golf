@@ -47,5 +47,6 @@ NUM_LAYERS=10 INT8_KEEP_FLOAT_FP16_NAME_PATTERNS=tok_emb MUON_WEIGHT_DECAY=0.10 
   parameters/artifact bytes.
 - Do not rerun deep supervision. H100 already killed it.
 - The highest-signal next RunPod action is TTT-only ablation on the existing
-  corrected checkpoint. If TTT cannot beat `1.20303259`, move to tokenizer/data
-  work rather than more SP1024 micro-toggles.
+  corrected checkpoint, including `TTT_EPOCHS` as a legal score-first knob. If
+  TTT cannot beat `1.20303259`, move to tokenizer/data work rather than more
+  SP1024 micro-toggles.

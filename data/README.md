@@ -52,6 +52,22 @@ python3 data/download_hf_docs_and_tokenize.py \
 
 The sidecar `docs_selected.source_manifest.json` includes `docs_sha256`, so users can verify they are rebuilding from the exact same document list and order as the baseline export.
 
+For the local-first research sprint, keep the default `tokenizer_specs.json` on
+SP1024 and use the non-default `tokenizer_specs_research.json` when intentionally
+building larger-vocabulary exports:
+
+```bash
+python3 data/download_hf_docs_and_tokenize.py \
+  --output-root ./data/research_tokenizers \
+  --tokenizer-config ./data/tokenizer_specs_research.json \
+  --tokenizer-train-docs 200000 \
+  --chunk-tokens 1000000
+```
+
+That command is a smoke export, not the final H100 dataset. It validates that
+SP2048/SP4096 tokenizer training, shard writing, manifest metadata, and
+dataset/tokenizer pairing work before spending RunPod time on a full export.
+
 ## Useful Knobs
 
 For CPU-heavy exports, useful knobs are:

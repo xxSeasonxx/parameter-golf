@@ -19,11 +19,11 @@ Prioritized by expected impact. Each idea is one experiment, one commit.
 Run these in order:
 
 ### H100-Next-1: TTT eval-only ablation on corrected checkpoint [KNOWN, H100-ONLY]
-**What**: Keep training fixed and run `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz EVAL_ONLY_SKIP_ROUNDTRIP=1` while sweeping only `TTT_LORA_RANK`, `TTT_LORA_LR`, and `TTT_CHUNK_SIZE`.
+**What**: Keep training fixed and run `EVAL_ONLY_CHECKPOINT=./final_model.int8.ptz EVAL_ONLY_SKIP_ROUNDTRIP=1` while sweeping only `TTT_LORA_RANK`, `TTT_LORA_LR`, `TTT_CHUNK_SIZE`, and `TTT_EPOCHS`.
 **Why**: The corrected post-quant checkpoint is `1.20303259`, but current TTT worsens it to `1.2162`. Eval-only sweeps are much cheaper than full retraining and directly test whether TTT can still be useful.
 
 ### H100-Next-2: Tokenizer/data sprint, SP2048 or SP4096 [KNOWN, H100-ONLY]
-**What**: If TTT cannot beat `1.20303259`, retokenize the same docs with a larger SentencePiece vocabulary and run a clean H100 calibration.
+**What**: If TTT cannot beat `1.20303259`, retokenize the same docs with `data/tokenizer_specs_research.json` and a larger SentencePiece vocabulary, then run a clean H100 calibration.
 **Why**: Small SP1024 toggles are not closing the gap. Public leaderboard direction and first principles both point to tokenizer/context changes as the next large lever.
 
 ### H100-Next-3: 11L architectural refinement in isolation [KNOWN, LOW PRIORITY]
