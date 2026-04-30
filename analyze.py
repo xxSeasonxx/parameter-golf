@@ -125,7 +125,7 @@ def parse_log(log_path):
 
         # Final int8 roundtrip exact (authoritative metric)
         m = re.match(
-            r"final_int8_zlib_roundtrip_exact\s+val_loss:([\d.]+)\s+val_bpb:([\d.]+)",
+            r"final_int8_[\w.+-]+_roundtrip_exact\s+(?:eval_stride:\d+\s+)?val_loss:([\d.]+)\s+val_bpb:([\d.]+)",
             line,
         )
         if m:
@@ -135,7 +135,7 @@ def parse_log(log_path):
 
         # Final int8 roundtrip (with eval time)
         m = re.match(
-            r"final_int8_zlib_roundtrip\s+val_loss:([\d.]+)\s+val_bpb:([\d.]+)\s+eval_time:(\d+)ms",
+            r"final_int8_[\w.+-]+_roundtrip\s+(?:eval_stride:\d+\s+)?val_loss:([\d.]+)\s+val_bpb:([\d.]+)\s+eval_time:(\d+)ms",
             line,
         )
         if m:
@@ -161,13 +161,13 @@ def parse_log(log_path):
             summary["peak_memory_mib"] = int(m.group(1))
             continue
 
-        # Submission size (int8+zlib)
-        m = re.match(r"Serialized model int8\+zlib:\s*(\d+)\s*bytes", line)
+        # Submission size (int8+compression)
+        m = re.match(r"Serialized model int8\+[\w.+-]+:\s*(\d+)\s*bytes", line)
         if m:
             summary["artifact_bytes"] = int(m.group(1))
             continue
 
-        m = re.match(r"Total submission size int8\+zlib:\s*(\d+)\s*bytes", line)
+        m = re.match(r"Total submission size int8\+[\w.+-]+:\s*(\d+)\s*bytes", line)
         if m:
             summary["total_submission_bytes"] = int(m.group(1))
             continue

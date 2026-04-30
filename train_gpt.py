@@ -50,6 +50,10 @@ from train_gpt_common import (
 _get_ds_tap_layers = get_ds_tap_layers
 
 
+def final_roundtrip_log_prefix(compression_name: str) -> str:
+    return f"final_int8_{compression_name}_roundtrip"
+
+
 class Hyperparameters(_CommonHyperparameters):
     # PyTorch-only fields (TTT-LoRA, EMA, layer growth, zstd, calibrated quant,
     # plus train_files/val_files convenience strings and the non-tied embed/head LRs).
@@ -1504,6 +1508,7 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
+    compress_name = get_compression_name(args)
     if master_process:
         quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), calibrated=args.calibrated_quant)
         quant_buf = io.BytesIO()
@@ -1512,10 +1517,8 @@ def main() -> None:
         if args.use_zstd and zstd_mod is not None:
             compressor = zstd_mod.ZstdCompressor(level=args.zstd_level)
             quant_blob = compressor.compress(quant_raw)
-            compress_name = get_compression_name(args)
         else:
             quant_blob = zlib.compress(quant_raw, level=9)
-            compress_name = get_compression_name(args)
         quant_raw_bytes = len(quant_raw)
         with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1562,10 +1565,13 @@ def main() -> None:
     )
     torch.cuda.synchronize()
     log0(
-        f"final_int8_zlib_roundtrip eval_stride:{args.eval_stride} val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
+        f"{final_roundtrip_log_prefix(compress_name)} eval_stride:{args.eval_stride} val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
-    log0(f"final_int8_zlib_roundtrip_exact eval_stride:{args.eval_stride} val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    log0(
+        f"{final_roundtrip_log_prefix(compress_name)}_exact eval_stride:{args.eval_stride} "
+        f"val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}"
+    )
 
     torch._dynamo.reset()
     torch.cuda.synchronize()

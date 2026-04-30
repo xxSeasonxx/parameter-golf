@@ -57,6 +57,18 @@ final_int8_zlib_roundtrip val_loss:2.0727 val_bpb:1.2244 eval_time:1401ms
 final_int8_zlib_roundtrip_exact val_loss:2.07269931 val_bpb:1.22436570
 """
 
+SAMPLE_PYTORCH_ZSTD_LOG = """\
+feature_flags: ema=off calibrated_quant=off compression=zstd-22 deep_supervision=off layer_growth=off
+step:0/20000 val_loss:6.9370 val_bpb:4.0978 train_time:0ms step_avg:0.01ms
+step:1/20000 train_loss:6.9408 train_time:24ms step_avg:23.99ms
+step:200/20000 val_loss:2.8397 val_bpb:1.6774 train_time:8699ms step_avg:43.49ms
+Serialized model int8+zstd-22: 14479660 bytes
+Total submission size int8+zstd-22: 14551234 bytes
+final_int8_zstd-22_roundtrip eval_stride:64 val_loss:2.0908 val_bpb:1.2316 eval_time:490000ms
+final_int8_zstd-22_roundtrip_exact eval_stride:64 val_loss:2.09081234 val_bpb:1.23163600
+final_int8_ttt_lora val_loss:2.0545 val_bpb:1.2102 eval_time:310000ms
+"""
+
 
 def _write_temp_log(content):
     """Write content to a temp file and return its Path."""
@@ -170,6 +182,24 @@ class TestPyTorchLogParsing:
         parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_LOG))
         bpb = get_val_bpb(parsed)
         assert abs(bpb - 1.22436570) < 1e-6
+
+    def test_zstd_artifact_size(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
+        assert parsed["summary"]["artifact_bytes"] == 14479660
+
+    def test_zstd_total_submission_size(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
+        assert parsed["summary"]["total_submission_bytes"] == 14551234
+
+    def test_zstd_final_roundtrip_exact(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
+        s = parsed["summary"]
+        assert abs(s["final_val_loss"] - 2.09081234) < 1e-8
+        assert abs(s["final_val_bpb"] - 1.23163600) < 1e-8
+
+    def test_zstd_get_val_bpb_prefers_ttt(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
+        assert abs(get_val_bpb(parsed) - 1.2102) < 1e-6
 
 
 class TestEdgeCases:

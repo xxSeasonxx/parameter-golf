@@ -54,3 +54,8 @@ def test_feature_summary_marks_optional_features():
 def test_final_eval_weight_source():
     assert tg.final_eval_weight_source(False) == "live"
     assert tg.final_eval_weight_source(True) == "ema"
+
+
+def test_roundtrip_log_label_uses_compression_name():
+    assert tg.final_roundtrip_log_prefix("zstd-22") == "final_int8_zstd-22_roundtrip"
+    assert tg.final_roundtrip_log_prefix("zlib-9") == "final_int8_zlib-9_roundtrip"
