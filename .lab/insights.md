@@ -2,7 +2,7 @@
 
 Validated learnings from experiments. Single source of truth. Delete disproven hypotheses.
 
-## Current Best
+## Historical Apple Silicon Best
 
 ```
 commit: e8addc5

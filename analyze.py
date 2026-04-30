@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Post-run analysis and bookkeeping for parameter-golf experiments.
-Parses training logs from train_gpt_mlx.py, archives artifacts,
+Parses PyTorch and MLX training logs, archives artifacts,
 generates comparison plots, and produces analysis.md.
 
-Usage: python3 analyze.py
+Usage: python3 analyze.py [log_path]
 """
 
 import json
@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -47,6 +48,33 @@ def get_commit_hash(short=False):
 def get_commit_message():
     return git("log -1 --pretty=%s")
 
+
+def select_log_path(explicit_path=None, root=ROOT):
+    """Resolve the log to analyze: explicit path, newest runs/*.log, then run.log."""
+    root = Path(root)
+    if explicit_path is not None:
+        path = Path(explicit_path)
+        if not path.is_absolute():
+            path = root / path
+        if not path.exists():
+            raise FileNotFoundError(f"Log path not found: {path}")
+        return path
+
+    runs_dir = root / "runs"
+    run_logs = []
+    if runs_dir.exists():
+        run_logs = [p for p in runs_dir.glob("*.log") if p.is_file()]
+    if run_logs:
+        return max(run_logs, key=lambda p: (p.stat().st_mtime_ns, p.name))
+
+    root_log = root / "run.log"
+    if root_log.exists():
+        return root_log
+
+    raise FileNotFoundError(
+        "No run log found. Pass a log path, create runs/*.log, or create run.log in the project root."
+    )
+
 # ---------------------------------------------------------------------------
 # Parse train_gpt_mlx.py log output
 # ---------------------------------------------------------------------------
@@ -80,13 +108,18 @@ def parse_log(log_path):
         "run_id:", "mlx_version:", "train_loader:", "val_loader:",
         "tokenizer_path:", "model_params:", "iterations:", "optimizer:",
         "val_bpb:", "compute_dtype:", "dtypes ", "mlx_max_microbatch",
-        "WARNING:",
+        "WARNING:", "feature_flags:", "deep_supervision:", "layer_growth:",
+        "world_size:", "sdp_backends:", "attention_mode:", "tie_embeddings:",
+        "seed:",
     )
 
     for line in lines:
         line = line.strip()
         if not line:
             continue
+
+        if line.startswith("run_id:"):
+            summary["run_id"] = line.split(":", 1)[1].strip()
 
         # Training step: step:N/TOTAL train_loss:X.XXXX ... (optional tok_s:)
         m = re.match(
@@ -163,6 +196,11 @@ def parse_log(log_path):
 
         # Submission size (int8+compression)
         m = re.match(r"Serialized model int8\+[\w.+-]+:\s*(\d+)\s*bytes", line)
+        if m:
+            summary["artifact_bytes"] = int(m.group(1))
+            continue
+
+        m = re.match(r"serialized_model_int8_[\w.+-]+:\s*(\d+)(?:\s*bytes)?", line)
         if m:
             summary["artifact_bytes"] = int(m.group(1))
             continue
@@ -282,17 +320,35 @@ def compute_trajectory_stats(parsed):
 # Archive run
 # ---------------------------------------------------------------------------
 
-def archive_run(commit_short, parsed):
-    run_dir = LAB_DIR / commit_short
+def _slug(value):
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value).strip())
+    return safe.strip("-") or "run"
+
+
+def archive_run(commit_short, parsed, log_path=None, train_script=None, lab_dir=None):
+    lab_dir = LAB_DIR if lab_dir is None else Path(lab_dir)
+    log_path = RUN_LOG if log_path is None else Path(log_path)
+    train_script = TRAIN_SCRIPT if train_script is None else Path(train_script)
+
+    run_id = parsed.get("summary", {}).get("run_id")
+    parts = [_slug(commit_short)]
+    if run_id:
+        parts.append(_slug(run_id))
+    parts.append(datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    run_dir = lab_dir / "_".join(parts)
+    suffix = 1
+    while run_dir.exists():
+        run_dir = lab_dir / ("_".join(parts) + f"_{suffix}")
+        suffix += 1
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy log
-    if RUN_LOG.exists():
-        shutil.copy2(RUN_LOG, run_dir / "run.log")
+    if log_path.exists():
+        shutil.copy2(log_path, run_dir / "run.log")
 
     # Snapshot the training script
-    if TRAIN_SCRIPT.exists():
-        shutil.copy2(TRAIN_SCRIPT, run_dir / "train_gpt_mlx.py")
+    if train_script.exists():
+        shutil.copy2(train_script, run_dir / train_script.name)
 
     # Write parsed metrics as JSONL for easy programmatic access
     with open(run_dir / "metrics.jsonl", "w") as f:
@@ -314,8 +370,13 @@ def archive_run(commit_short, parsed):
 def _load_prev_history(results):
     """Load the most recent archived run's metrics for comparison."""
     for r in reversed(results):
-        path = LAB_DIR / r["commit"] / "metrics.jsonl"
-        if path.exists():
+        candidates = sorted(
+            LAB_DIR.glob(f"{r['commit']}*/metrics.jsonl"),
+            key=lambda p: p.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if candidates:
+            path = candidates[0]
             train = []
             val = []
             with open(path) as f:
@@ -437,9 +498,9 @@ def generate_analysis(parsed, traj_stats, results, run_dir, plot_files, commit_s
     # Final metrics
     lines.append("## Final Metrics")
     if "roundtrip_val_bpb" in summary:
-        lines.append(f"- Int8+zlib roundtrip val_bpb: {summary['roundtrip_val_bpb']:.6f}")
+        lines.append(f"- Int8 roundtrip val_bpb: {summary['roundtrip_val_bpb']:.6f}")
     if "final_val_bpb" in summary:
-        lines.append(f"- Int8+zlib exact val_bpb: {summary['final_val_bpb']:.8f}")
+        lines.append(f"- Int8 exact val_bpb: {summary['final_val_bpb']:.8f}")
     if "ttt_val_bpb" in summary:
         lines.append(f"- TTT LoRA val_bpb: {summary['ttt_val_bpb']:.6f}")
     lines.append("")
@@ -498,7 +559,7 @@ def generate_analysis(parsed, traj_stats, results, run_dir, plot_files, commit_s
 
     # Metrics pointer
     lines.append("## Metrics")
-    lines.append(f"Per-step metrics: `.lab/{commit_short}/metrics.jsonl`")
+    lines.append(f"Per-step metrics: `.lab/{run_dir.name}/metrics.jsonl`")
     lines.append("Each line is JSON with keys: `type`, `step`, `total`, `train_loss`/`val_loss`/`val_bpb`, `train_time_ms`, `step_avg_ms`")
     lines.append("")
 
@@ -533,15 +594,21 @@ def find_best_run(results):
 def main():
     print("analyze.py: Post-run analysis for parameter-golf")
 
-    if not RUN_LOG.exists():
-        print("ERROR: run.log not found. Did train_gpt_mlx.py finish?", file=sys.stderr)
-        print("  Expected: run.log in project root", file=sys.stderr)
+    explicit_log = sys.argv[1] if len(sys.argv) > 1 else None
+    if len(sys.argv) > 2:
+        print("ERROR: Usage: python analyze.py [log_path]", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        log_path = select_log_path(explicit_log)
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
     # Parse log
-    parsed = parse_log(RUN_LOG)
+    parsed = parse_log(log_path)
     if parsed is None:
-        print("ERROR: Could not parse run.log", file=sys.stderr)
+        print(f"ERROR: Could not parse {log_path}", file=sys.stderr)
         sys.exit(1)
 
     commit = get_commit_hash(short=True) or "unknown"
@@ -549,6 +616,7 @@ def main():
     val_bpb = get_val_bpb(parsed) or 0
     summary = parsed["summary"]
 
+    print(f"  Log: {log_path}")
     print(f"  Commit: {commit} ({commit_msg})")
     print(f"  val_bpb: {val_bpb:.6f}")
     if "peak_memory_mib" in summary:
@@ -567,7 +635,7 @@ def main():
     results = load_results()
 
     # Archive
-    run_dir = archive_run(commit, parsed)
+    run_dir = archive_run(commit, parsed, log_path=log_path)
     print(f"  Archived to: {run_dir}")
 
     # Generate plots

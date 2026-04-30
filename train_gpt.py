@@ -54,6 +54,48 @@ def final_roundtrip_log_prefix(compression_name: str) -> str:
     return f"final_int8_{compression_name}_roundtrip"
 
 
+SUBMISSION_CODE_FILES = ("train_gpt.py", "train_gpt_common.py")
+
+
+def compute_submission_code_bytes(
+    files: tuple[str, ...] = SUBMISSION_CODE_FILES,
+    root: Path | None = None,
+) -> int:
+    """Return the code bytes that must ship with the PyTorch submission."""
+    base = Path(__file__).resolve().parent if root is None else root
+    return sum(len((base / rel_path).read_bytes()) for rel_path in files)
+
+
+def require_zstd_if_requested(args, zstd_available: bool | None = None) -> None:
+    if zstd_available is None:
+        zstd_available = zstd_mod is not None
+    if args.use_zstd and not zstd_available:
+        raise RuntimeError("USE_ZSTD=1 requires the zstandard package to be installed")
+
+
+def current_train_time_ms(
+    accumulated_train_time_ms: float,
+    active_segment_start: float,
+    now: float | None = None,
+) -> float:
+    now = time.perf_counter() if now is None else now
+    return accumulated_train_time_ms + 1000.0 * (now - active_segment_start)
+
+
+def format_stopping_early_log(step: int, total_iterations: int, train_time_ms: float) -> str:
+    return (
+        f"stopping_early: wallclock_cap train_time:{train_time_ms:.0f}ms "
+        f"step:{step}/{total_iterations}"
+    )
+
+
+def validate_expected_train_shards(actual: int, expected: int) -> None:
+    if expected > 0 and actual != expected:
+        raise RuntimeError(
+            f"train_shards:{actual}/{expected} does not match EXPECTED_TRAIN_SHARDS={expected}"
+        )
+
+
 class Hyperparameters(_CommonHyperparameters):
     # PyTorch-only fields (TTT-LoRA, EMA, layer growth, zstd, calibrated quant,
     # plus train_files/val_files convenience strings and the non-tied embed/head LRs).
@@ -70,6 +112,7 @@ class Hyperparameters(_CommonHyperparameters):
     grow_at_wallclock_frac = float(os.environ.get("GROW_AT_WALLCLOCK_FRAC", 0.35))
     use_zstd = bool(int(os.environ.get("USE_ZSTD", "0")))
     zstd_level = int(os.environ.get("ZSTD_LEVEL", 22))
+    expected_train_shards = int(os.environ.get("EXPECTED_TRAIN_SHARDS", 0))
 
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 8))
     ttt_lora_lr = float(os.environ.get("TTT_LORA_LR", 0.01))
@@ -286,13 +329,12 @@ def eval_val_sliding(
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
 ) -> tuple[float, float]:
-    """Sliding-window evaluation: each scored token sees (seq_len - stride) of context.
+    """Sliding-window evaluation that scores each validation prediction once.
 
     Uses model(..., return_per_token=True) to get per-position loss, batches multiple
     windows together, and sums ONLY the loss positions that should be scored:
-    - First window: all (seq_len - 1) predictions (no context tax on the cold start).
-    - Subsequent windows: only the last `stride` predictions (each saw seq_len - stride
-      of context).
+    - First window: up to `seq_len` predictions (no context tax on the cold start).
+    - Subsequent windows: predictions in global positions [pos:win_end).
 
     Two correctness invariants this fix protects:
     1. Per-window scoring is exact: we sum the per-token cross-entropy at scored
@@ -302,26 +344,26 @@ def eval_val_sliding(
        which on a 27M model at seq=1024 is roughly the training-step compute cost,
        saturating the GPU vs the prior 1-window-per-call (kernel-launch-dominated).
     """
-    stride = args.eval_stride if args.eval_stride > 0 else args.train_seq_len
     seq_len = args.train_seq_len
+    stride = args.eval_stride if args.eval_stride > 0 else seq_len
+    stride = min(stride, seq_len)
     n_tokens = val_tokens.numel()
 
-    # Plan all windows globally (deterministic, every rank agrees).
-    # Convention here matches the MLX path: n_pred = max valid prediction position.
+    # Plan all windows globally (deterministic, every rank agrees). Prediction
+    # position p predicts val_tokens[p + 1] from val_tokens[p].
     n_pred = n_tokens - 1
     if n_pred < 1:
         return 0.0, 0.0
     windows: list[tuple[int, int, int]] = []
-    # First window: starts at 0, scores up to seq_len-1 predictions.
-    first_n = min(seq_len - 1, n_pred)
+    # First window: starts at 0 and scores up to seq_len predictions.
+    first_n = min(seq_len, n_pred)
     windows.append((0, 0, first_n))
-    pos = seq_len - 1
+    pos = seq_len
     while pos < n_pred:
         win_end = min(pos + stride, n_pred)
-        win_start = max(win_end - (seq_len - 1), 0)
-        n_scored = min(stride, win_end - win_start)
-        score_start = win_end - n_scored
-        windows.append((win_start, score_start, n_scored))
+        n_scored = win_end - pos
+        win_start = max(win_end - seq_len, 0)
+        windows.append((win_start, pos, n_scored))
         pos = win_end
     n_windows_total = len(windows)
 
@@ -348,15 +390,13 @@ def eval_val_sliding(
             x_batch = torch.zeros((actual_batch, seq_len), dtype=torch.int64, device=device)
             y_batch = torch.zeros((actual_batch, seq_len), dtype=torch.int64, device=device)
             for i, (ws, _, _) in enumerate(batch):
-                # Window covers tokens [ws : ws+seq_len], inputs are [ws:ws+seq_len-1] and
-                # targets are [ws+1:ws+seq_len], both length seq_len-1. Pad to seq_len with zeros.
-                win_tok_end = min(ws + seq_len, n_tokens)
+                # Window covers up to seq_len+1 raw tokens so x/y contain up
+                # to seq_len next-token predictions. Pad shorter tail rows.
+                win_tok_end = min(ws + seq_len + 1, n_tokens)
                 win_len = win_tok_end - ws
                 if win_len < 2:
                     continue
                 toks = val_tokens[ws:win_tok_end].to(device=device, dtype=torch.int64, non_blocking=True)
-                # Place into row i; positions [0:win_len-1] hold inputs, [1:win_len] hold targets.
-                # We use the same index range for x and y but offset by 1 in the source slice.
                 x_batch[i, :win_len - 1] = toks[:-1]
                 y_batch[i, :win_len - 1] = toks[1:]
 
@@ -1173,6 +1213,7 @@ def main() -> None:
 
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    require_zstd_if_requested(args)
     zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)
 
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
@@ -1242,6 +1283,7 @@ def main() -> None:
         )
     dataset_dir = Path(args.data_path).resolve()
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
+    validate_expected_train_shards(actual_train_files, args.expected_train_shards)
     val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
@@ -1389,10 +1431,10 @@ def main() -> None:
 
         if last_step:
             if stop_after_step is not None and step < args.iterations:
-                log0(
-                    f"stopping_early: wallclock_cap train_time:{training_time_ms:.0f}ms "
-                    f"step:{step}/{args.iterations}"
-                )
+                torch.cuda.synchronize()
+                training_time_ms = current_train_time_ms(training_time_ms, t0)
+                t0 = time.perf_counter()
+                log0(format_stopping_early_log(step, args.iterations, training_time_ms))
             break
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
@@ -1503,12 +1545,12 @@ def main() -> None:
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
         model_bytes = os.path.getsize("final_model.pt")
-        code_bytes = len(code.encode("utf-8"))
-        log0(f"Serialized model: {model_bytes} bytes")
-        log0(f"Code size: {code_bytes} bytes")
-        log0(f"Total submission size: {model_bytes + code_bytes} bytes")
+        code_bytes = compute_submission_code_bytes()
+        log0(f"Serialized raw float checkpoint: {model_bytes} bytes")
+        log0(f"Submission code size: {code_bytes} bytes")
+        log0(f"Raw checkpoint plus submission code size: {model_bytes + code_bytes} bytes")
 
-    compress_name = get_compression_name(args)
+    compress_name = get_compression_name(args, zstd_available=zstd_mod is not None)
     if master_process:
         quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), calibrated=args.calibrated_quant)
         quant_buf = io.BytesIO()
@@ -1523,7 +1565,7 @@ def main() -> None:
         with open("final_model.int8.ptz", "wb") as f:
             f.write(quant_blob)
         quant_file_bytes = os.path.getsize("final_model.int8.ptz")
-        code_bytes = len(code.encode("utf-8"))
+        code_bytes = compute_submission_code_bytes()
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
             f"Serialized model int8+{compress_name}: {quant_file_bytes} bytes "

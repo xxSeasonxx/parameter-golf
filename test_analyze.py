@@ -2,10 +2,17 @@
 """Unit tests for analyze.py log parsing against real MLX baseline output."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
-from analyze import parse_log, get_val_bpb, compute_trajectory_stats
+from analyze import (
+    archive_run,
+    compute_trajectory_stats,
+    get_val_bpb,
+    parse_log,
+    select_log_path,
+)
 
 
 # Minimal MLX log excerpt (source code dump omitted, just the meaningful parts)
@@ -58,7 +65,15 @@ final_int8_zlib_roundtrip_exact val_loss:2.07269931 val_bpb:1.22436570
 """
 
 SAMPLE_PYTORCH_ZSTD_LOG = """\
+run_id:h100_l0_only
 feature_flags: ema=off calibrated_quant=off compression=zstd-22 deep_supervision=off layer_growth=off
+deep_supervision:alpha=0.05 tap_layers=[3, 7]
+layer_growth:start_layers=8 target_layers=11 grow_at_frac=0.350
+world_size:8 grad_accum_steps:1
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+seed:1337
 step:0/20000 val_loss:6.9370 val_bpb:4.0978 train_time:0ms step_avg:0.01ms
 step:1/20000 train_loss:6.9408 train_time:24ms step_avg:23.99ms
 step:200/20000 val_loss:2.8397 val_bpb:1.6774 train_time:8699ms step_avg:43.49ms
@@ -69,6 +84,13 @@ final_int8_zstd-22_roundtrip_exact eval_stride:64 val_loss:2.09081234 val_bpb:1.
 final_int8_ttt_lora val_loss:2.0545 val_bpb:1.2102 eval_time:310000ms
 """
 
+SAMPLE_MLX_ARTIFACT_LOG = """\
+run_id:mlx_smoke
+step:1/200 train_loss:6.9428 train_time:263ms step_avg:263.06ms tok_s:31142
+serialized_model_int8_zlib:13124539 bytes
+final_int8_zlib_roundtrip_exact val_loss:2.7402 val_bpb:1.6215
+"""
+
 
 def _write_temp_log(content):
     """Write content to a temp file and return its Path."""
@@ -76,6 +98,34 @@ def _write_temp_log(content):
     tmp.write(content)
     tmp.close()
     return Path(tmp.name)
+
+
+def test_explicit_log_path_wins(tmp_path):
+    explicit = tmp_path / "explicit.log"
+    explicit.write_text("run_id:explicit\n")
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    newer = runs / "newer.log"
+    newer.write_text("run_id:newer\n")
+    assert select_log_path(explicit, root=tmp_path) == explicit
+
+
+def test_newest_runs_log_selected_when_no_argument(tmp_path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    older = runs / "older.log"
+    newer = runs / "newer.log"
+    older.write_text("run_id:older\n")
+    newer.write_text("run_id:newer\n")
+    os.utime(older, (1, 1))
+    os.utime(newer, (2, 2))
+    assert select_log_path(None, root=tmp_path) == newer
+
+
+def test_root_run_log_fallback_when_runs_empty(tmp_path):
+    root_log = tmp_path / "run.log"
+    root_log.write_text("run_id:root\n")
+    assert select_log_path(None, root=tmp_path) == root_log
 
 
 class TestMLXLogParsing:
@@ -124,6 +174,10 @@ class TestMLXLogParsing:
         # Should NOT contain python source code
         assert not any("import " in c for c in config)
         assert not any("def " in c for c in config)
+
+    def test_mlx_serialized_artifact_size(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_MLX_ARTIFACT_LOG))
+        assert parsed["summary"]["artifact_bytes"] == 13124539
 
     def test_get_val_bpb_prefers_exact(self):
         parsed = parse_log(_write_temp_log(SAMPLE_MLX_LOG))
@@ -200,6 +254,39 @@ class TestPyTorchLogParsing:
     def test_zstd_get_val_bpb_prefers_ttt(self):
         parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
         assert abs(get_val_bpb(parsed) - 1.2102) < 1e-6
+
+    def test_active_feature_config_lines_captured(self):
+        parsed = parse_log(_write_temp_log(SAMPLE_PYTORCH_ZSTD_LOG))
+        config = parsed["config_lines"]
+        for expected in [
+            "feature_flags:",
+            "deep_supervision:",
+            "layer_growth:",
+            "world_size:",
+            "sdp_backends:",
+            "attention_mode:",
+            "tie_embeddings:",
+            "seed:",
+        ]:
+            assert any(line.startswith(expected) for line in config)
+
+
+def test_repeated_same_commit_archives_do_not_collide(tmp_path):
+    log_path = tmp_path / "run.log"
+    log_path.write_text("run_id:h100_l0_only\nstep:1/10 train_loss:1.0 train_time:1ms step_avg:1.0ms\n")
+    script_path = tmp_path / "train_gpt_mlx.py"
+    script_path.write_text("# script\n")
+    parsed = parse_log(log_path)
+    lab_dir = tmp_path / ".lab"
+
+    first = archive_run("abc1234", parsed, log_path=log_path, train_script=script_path, lab_dir=lab_dir)
+    second = archive_run("abc1234", parsed, log_path=log_path, train_script=script_path, lab_dir=lab_dir)
+
+    assert first != second
+    assert first.exists()
+    assert second.exists()
+    assert first.name.startswith("abc1234_h100_l0_only_")
+    assert second.name.startswith("abc1234_h100_l0_only_")
 
 
 class TestEdgeCases:

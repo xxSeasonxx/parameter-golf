@@ -100,6 +100,7 @@ def test_baseline_runner_is_l0_only_control():
         "USE_POLAR_EXPRESS": "0",
         "USE_DYT_NORM": "0",
         "VAL_LOSS_EVERY": "0",
+        "EXPECTED_TRAIN_SHARDS": "195",
     }
     for name, value in required.items():
         assert assignments.get(name) == value
@@ -118,6 +119,7 @@ def test_next_experiment_runner_is_isolated_deep_supervision():
         "EVAL_STRIDE": "64",
         "USE_ZSTD": "1",
         "VAL_LOSS_EVERY": "0",
+        "EXPECTED_TRAIN_SHARDS": "195",
     }
     for name, value in required.items():
         assert assignments.get(name) == value

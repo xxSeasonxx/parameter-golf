@@ -29,6 +29,7 @@ export QAT_EVERY=10
 export USE_ZSTD=1
 export ZSTD_LEVEL=22
 export EMA_DECAY=0
+export EXPECTED_TRAIN_SHARDS=195
 
 # Isolated experimental variable.
 export DEEP_SUPERVISION=1

@@ -254,17 +254,20 @@ def compute_bpb_from_sums(
 # QAT-REGULARIZER + CALIBRATED-INT8-QUANT HELPERS (framework-typed)
 # ============================================================================
 # sim_quant_roundtrip is the per-step "fake quant noise" used by the
-# pre-warmdown QAT regularizer (exp_051). quantize_float_tensor_calibrated is
-# the MSE-optimal clip-percentile sweep used during the final int8 serializer
-# (exp_055 era). Both are OUR additions over upstream.
+# pre-warmdown QAT regularizer (exp_051). It injects max-abs int8 roundtrip
+# noise and intentionally does not exactly mirror the final percentile or
+# calibrated serializer. quantize_float_tensor_calibrated is the MSE-optimal
+# clip-percentile sweep used during final int8 serialization (exp_055 era).
+# Both are OUR additions over upstream.
 
 if _HAS_TORCH:
     def sim_quant_roundtrip_torch(w):
         """Simulate int8 quantize -> dequantize roundtrip in PyTorch ops.
 
-        Per-row for 2D, per-tensor for 1D. Mirrors the actual int8 quantization
-        path. Used by the pre-warmdown QAT regularizer to inject quant noise
-        every QAT_EVERY steps during training.
+        Per-row max-abs for 2D, per-tensor max-abs for 1D. This deliberately
+        approximates final serialization noise; it does not exactly mirror the
+        percentile or calibrated final int8 path. Used by the pre-warmdown QAT
+        regularizer to inject quant noise every QAT_EVERY steps during training.
         """
         f = w.float()
         qmax = 127.0
