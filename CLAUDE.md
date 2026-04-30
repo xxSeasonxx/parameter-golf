@@ -15,23 +15,24 @@ conda run -n openai --no-capture-output <command>
 
 ```bash
 # Data (10 shards for local dev)
-conda run -n openai --no-capture-output python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
+conda run -n openai --no-capture-output python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
 
 # Training — see .lab/insights.md for BEST_CONFIG_VARS (batch size, WD, etc.)
 RUN_ID=exp_NNN <BEST_CONFIG_VARS> ITERATIONS=2000 VAL_LOSS_EVERY=500 \
-  conda run -n openai --no-capture-output python3 train_gpt_mlx.py 2>&1 | tee run.log
+  conda run -n openai --no-capture-output python train_gpt_mlx.py 2>&1 | tee run.log
 
 # Post-run analysis
-conda run -n openai --no-capture-output python3 analyze.py
+conda run -n openai --no-capture-output python analyze.py
 
 # Tests
-conda run -n openai --no-capture-output python3 -m pytest test_analyze.py -v
+conda run -n openai --no-capture-output python -m pytest test_analyze.py -v
 ```
 
 ## Files
 
 - **`train_gpt_mlx.py`** — Apple Silicon experiment file. Model, optimizer, training loop.
-- **`train_gpt.py`** — H100 active development. Trusted baseline result (1.2102 BPB) is at git tag `baseline-3e34098` (commit 3e34098). For A/B comparison, check out the tag in a worktree.
+- **`train_gpt.py`** — H100 active development and active RunPod entrypoint. Trusted baseline result (1.2102 BPB) is at git tag `baseline-3e34098`.
+- **`train_gpt_h100.py`** — Deprecated historical H100 variant. Do not use for new runs.
 - **`analyze.py`** — Post-run analysis. READ-ONLY.
 - **`program.md`** — Experiment loop process (how to run, analyze, decide, iterate).
 - **`docs/superpowers/specs/`** — Sprint design docs.
